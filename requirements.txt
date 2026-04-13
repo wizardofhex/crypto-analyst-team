@@ -7,5 +7,6 @@ yfinance>=0.2.36
 python-dotenv>=1.0.0
 streamlit>=1.32.0
 plotly>=5.18.0
+matplotlib>=3.7.0
 PyJWT>=2.8.0
 cryptography>=41.0.0

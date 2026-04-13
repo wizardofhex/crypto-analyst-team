@@ -439,7 +439,7 @@ def fp(v: Optional[float]) -> str:
 
 def fpc(v: Optional[float], sign: bool = True) -> str:
     """Format a percentage value."""
-    if v is None:
+    if v is None or (isinstance(v, float) and (v != v)):  # None or NaN
         return "—"
     s = "+" if v > 0 and sign else ""
     return f"{s}{v:.2f}%"
@@ -587,9 +587,11 @@ def page_overview():
     total_closed = len(closed)
     wins         = int((closed["outcome_pct"] > 0).sum()) if not closed.empty else 0
     win_rate     = round(wins / total_closed * 100, 1) if total_closed else 0.0
-    total_pnl    = float(closed["outcome_pct"].sum()) if not closed.empty else 0.0
+    _pnl_raw     = closed["outcome_pct"].dropna().sum() if not closed.empty else 0.0
+    total_pnl    = 0.0 if (_pnl_raw != _pnl_raw) else float(_pnl_raw)  # NaN guard
     open_count   = len(open_recs)
-    avg_conf     = round(float(all_recs["confidence"].mean()), 1) if not all_recs.empty and "confidence" in all_recs else 0.0
+    _conf_raw    = all_recs["confidence"].dropna().mean() if not all_recs.empty and "confidence" in all_recs else 0.0
+    avg_conf     = 0.0 if (_conf_raw != _conf_raw) else round(float(_conf_raw), 1)  # NaN guard
 
     # ── Dollar P&L metrics ────────────────────────────────────────────────
     realized_pnl_usd = 0.0
@@ -754,7 +756,7 @@ def page_leaderboard():
             "Avg Return %":  round(np.mean(outcomes), 2)  if outcomes else 0.0,
             "Best %":        round(max(outcomes), 2)       if outcomes else 0.0,
             "Worst %":       round(min(outcomes), 2)       if outcomes else 0.0,
-            "Avg Conf":      round(float(sub["confidence"].mean()), 1) if not sub.empty else 0.0,
+            "Avg Conf":      round(float(sub["confidence"].dropna().mean()), 1) if not sub.empty and sub["confidence"].notna().any() else 0.0,
             "Sharpe":        sharpe_ratio(outcomes),
             "Total P&L $":   _pnl_usd_fmt,
         })
@@ -776,12 +778,12 @@ def page_leaderboard():
         .background_gradient(subset=["Win Rate %"],   cmap="RdYlGn", vmin=0,   vmax=100)
         .background_gradient(subset=["Avg Return %"], cmap="RdYlGn", vmin=-20, vmax=20)
         .format({
-            "Win Rate %":   "{:.1f}%",
+            "Win Rate %":   lambda x: f"{x:.1f}%" if x == x else "—",
             "Avg Return %": lambda x: fpc(x),
             "Best %":       lambda x: fpc(x),
             "Worst %":      lambda x: fpc(x),
-            "Sharpe":       "{:.2f}",
-            "Avg Conf":     "{:.1f}",
+            "Sharpe":       lambda x: f"{x:.2f}" if x == x else "—",
+            "Avg Conf":     lambda x: f"{x:.1f}" if x == x else "—",
         })
         .apply(fmt_pnl_cell_color, subset=["Total P&L $"])
     )
@@ -1237,7 +1239,8 @@ def page_coin():
     closed_c  = len(coin_close)
     wins_c    = int((coin_close["outcome_pct"] > 0).sum()) if not coin_close.empty else 0
     wr_c      = round(wins_c / closed_c * 100, 1) if closed_c else 0.0
-    avg_ret_c = round(float(coin_close["outcome_pct"].mean()), 2) if not coin_close.empty else 0.0
+    _avg_raw  = coin_close["outcome_pct"].dropna().mean() if not coin_close.empty else 0.0
+    avg_ret_c = 0.0 if (_avg_raw != _avg_raw) else round(float(_avg_raw), 2)
     n_analysts = coin_recs["analyst"].nunique()
 
     # ── KPIs ───────────────────────────────────────────────────────────────
@@ -1316,7 +1319,7 @@ def page_coin():
                 "Date": date,
                 "Top Direction": top,
                 "Agreement %": round(pct_agree),
-                "Avg Outcome %": round(float(grp["outcome_pct"].mean()), 2),
+                "Avg Outcome %": round(float(grp["outcome_pct"].dropna().mean()), 2) if grp["outcome_pct"].notna().any() else 0.0,
                 "# Analysts": len(grp),
             })
         if ag_rows:

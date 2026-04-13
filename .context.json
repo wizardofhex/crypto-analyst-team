@@ -1,0 +1,45 @@
+{
+  "task_id": "task-2c7840a2",
+  "requirement": "Apply 10 code fixes. Read each file before editing.\n\nFIX1 agents.py _build_system_prompt rules section: Add rule 7 saying analysts must append a SIGNAL line at end of trade calls in format: [SIGNAL: LONG|SHORT|WATCH|AVOID|NEUTRAL | CONFIDENCE: N | TARGET: dollar-amount | STOP: dollar-amount | THESIS: one line]. WATCH/AVOID/NEUTRAL omit TARGET/STOP. Omit entirely if just commenting.\n\nFIX1 main.py: Import save_recommendation from tracker. Add parse_signal(response, analyst_name, symbol, current_price) that regex-extracts the SIGNAL block, saves LONG/SHORT to DB via save_recommendation, wrapped in try/except. Call after each analyst response in run_full_analysis and run_general_query passing market_data coingecko price.\n\nFIX2 data_fetcher.py fetch_all_market_data: Change YF_INTERVAL_MAP to remove the 4h key entirely: YF_INTERVAL_MAP = {15m: 15m, 1h: 1h, 1d: 1d}. When 4H Binance fails and no fallback, log warning and leave ohlcv_data[4h] = None.\n\nFIX3 agents.py format_market_data_for_prompt: Remove the break statement and its comment at the bottom of the timeframe loop (the lines: if tf_key != 4h: break). All timeframes should appear in the prompt.\n\nFIX4 dashboard.py: Remove @st.cache_resource from _db(). Change _db() to create a NEW connection each call (not cached) so threads get isolated connections.\n\nFIX5 dashboard.py load_recs(): Replace the f-string SQL WHERE clause (sql += f WHERE status = {status}) with a parameterized query. The function signature stays the same. Use qdf(sql, params=(status,)) with sql using a ? placeholder.\n\nFIX6 data_fetcher.py: Add fetch_crypto_news(symbol) function that calls https://cryptopanic.com/api/v1/posts/?auth_token=free and currencies=SYMBOL with filter=hot. Returns list of up to 5 dicts with title/source/published_at/sentiment. On any error returns empty list. Add result[news] = fetch_crypto_news(symbol) to fetch_all_market_data. In agents.py format_market_data_for_prompt, add a NEWS section showing headlines if market_data.get(news) is non-empty.\n\nFIX7 indicators.py calculate_all_indicators: Add optional timeframe='' parameter. Skip VWAP calculation (set results[vwap]=None) when timeframe is 4h or 1d. In agents.py format_market_data_for_prompt, pass tf_key to calculate_all_indicators(df, timeframe=tf_key).\n\nFIX8 agents.py _INJECTION_PATTERNS: Replace the regex with a tighter version using re.MULTILINE and ^ anchor so it only matches at line start. New pattern: compile with MULTILINE flag matching lines starting with: ignore, forget, disregard, override, bypass, jailbreak, you must now, you will now, your new role, act as, pretend you are, new instruction, system:. This stops falsely blocking RULES: and === in legitimate lookback content.\n\nFIX9 main.py: Add import argparse. In main() parse --model flag defaulting to claude-haiku-4-5-20251001 with choice claude-sonnet-4-6 as alternative. Pass model to create_analyst_team. In agents.py create_analyst_team accept model=MODEL param and pass to Analyst constructors. Add _session dict tracking calls and estimated USD cost. After each analyst response add estimated cost (haiku: 0.00035 per call, sonnet: 0.0042 per call as rough estimate). Show running cost in Prompt.ask footer.\n\nFIX10 data_fetcher.py _get(): In the HTTPError handler, if response status code is 429, sleep 60 seconds and retry once. If retry also fails, return a dict with _rate_limited=True key. In fetch_all_market_data check coingecko result for _rate_limited flag and set _cg_rate_limited=True in result. In agents.py format_market_data_for_prompt, if cg has _rate_limited key, prepend a bold warning saying price data is unavailable due to rate limiting and analysts must not fabricate prices.\n\nAfter all changes verify syntax: python -m py_compile config.py indicators.py tracker.py performance.py main.py agents.py data_fetcher.py dashboard.py",
+  "design": {},
+  "test_report": {
+    "raw_output": "Good context. Let me run the test suite to see current state.\nAll **49/49 tests pass**. The suite is clean.\n\nHere's the QA status for this codebase:\n\n---\n\n**Test Suite: 49/49 PASSED** (7.5s)\n\n| File | Tests | Status |\n|------|-------|--------|\n| `test_data_fetcher.py` | 17 | All pass |\n| `test_indicators.py` | 18 | All pass |\n| `test_tracker.py` | 14 | All pass |\n\n**Coverage areas verified:**\n- Order book imbalance (balanced, bid-heavy, ask-heavy, empty, malformed)\n- Symbol \u2192 CoinGecko ID mapping (all config symbols)\n- RSI range, length, monotonic behaviour\n- MACD histogram identity (`macd \u2212 signal = hist`)\n- Bollinger Bands `ddof=1` (sample std dev) and ordering\n- VWAP session-reset at midnight UTC\n- `save_recommendation`: ID return, invalid direction, confidence clamping, case normalization\n- `close_recommendation`: LONG profit, SHORT profit, loss, unknown ID, invalid status, auto-stats update\n- `get_recommendations_history`: filtering by symbol, analyst, days\n\nAll CODE_REVIEW findings from the prior review pass their regression tests. No regressions, no flaky tests. Ready for next task.\nAll **49/49 tests pass**. The suite is clean.\n\nHere's the QA status for this codebase:\n\n---\n\n**Test Suite: 49/49 PASSED** (7.5s)\n\n| File | Tests | Status |\n|------|-------|--------|\n| `test_data_fetcher.py` | 17 | All pass |\n| `test_indicators.py` | 18 | All pass |\n| `test_tracker.py` | 14 | All pass |\n\n**Coverage areas verified:**\n- Order book imbalance (balanced, bid-heavy, ask-heavy, empty, malformed)\n- Symbol \u2192 CoinGecko ID mapping (all config symbols)\n- RSI range, length, monotonic behaviour\n- MACD histogram identity (`macd \u2212 signal = hist`)\n- Bollinger Bands `ddof=1` (sample std dev) and ordering\n- VWAP session-reset at midnight UTC\n- `save_recommendation`: ID return, invalid direction, confidence clamping, case normalization\n- `close_recommendation`: LONG profit, SHORT profit, loss, unknown ID, invalid status, auto-stats update\n- `get_recommendations_history`: filtering by "
+  },
+  "security_findings": [],
+  "audit_findings": [],
+  "revision_count": 0,
+  "pipeline_log": [
+    {
+      "stage": "developer_fix",
+      "agent": "developer",
+      "status": "complete",
+      "findings": 0,
+      "elapsed": 20.4,
+      "timestamp": "2026-04-03T08:49:23.251145"
+    },
+    {
+      "stage": "qa_review",
+      "agent": "qa_tech",
+      "status": "complete",
+      "findings": 0,
+      "elapsed": 40.8,
+      "timestamp": "2026-04-03T08:50:04.071546"
+    },
+    {
+      "stage": "security_review",
+      "agent": "security_engineer",
+      "status": "complete",
+      "findings": 0,
+      "elapsed": 31.5,
+      "timestamp": "2026-04-03T08:51:42.970832"
+    },
+    {
+      "stage": "code_audit",
+      "agent": "code_auditor",
+      "status": "complete",
+      "findings": 0,
+      "elapsed": 98.9,
+      "timestamp": "2026-04-03T08:51:42.970847"
+    }
+  ]
+}

@@ -951,15 +951,21 @@ section[data-testid="stMain"] button[kind="primary"] {
     box-shadow: 0 0 0 4px rgba(56,208,255,.15) !important;
 }
 
-/* ── Scrollbar ────────────────────────────────────────────────────────── */
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb {
-    background: var(--border2);
-    border-radius: 10px;
-    border: 2px solid var(--bg);
+/* ── Scrollbars — hidden, scrolling still works ───────────────────────── */
+html, body, *, *::before, *::after {
+    scrollbar-width: none !important;        /* Firefox */
+    -ms-overflow-style: none !important;     /* IE/Edge */
 }
-::-webkit-scrollbar-thumb:hover { background: #3a4863; }
+::-webkit-scrollbar,
+*::-webkit-scrollbar {
+    width: 0 !important;
+    height: 0 !important;
+    display: none !important;
+    background: transparent !important;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-thumb,
+::-webkit-scrollbar-corner { display: none !important; background: transparent !important; }
 
 /* ── Code blocks ──────────────────────────────────────────────────────── */
 code, pre code {
@@ -990,6 +996,39 @@ header [data-testid="stHeaderActionElements"] { display: none !important; }
 header[data-testid="stHeader"] {
     background: transparent !important;
     height: 0 !important;
+}
+
+/* ── Kill the sidebar collapse/expand chevron buttons entirely ─────────
+   Streamlit renders these as Material Symbols ligatures
+   (e.g. "keyboard_double_arrow_left"). When the font fails to load
+   the raw ligature text leaks through, so we just remove the button. */
+[data-testid="stSidebarCollapseButton"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"],
+button[title="Close sidebar"],
+button[title="Open sidebar"],
+[data-testid="stSidebar"] [data-testid="stBaseButton-headerNoPadding"] {
+    display: none !important;
+    visibility: hidden !important;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
+}
+
+/* Nuke any orphan Material Symbols ligature text that leaks through
+   (belt-and-braces in case Streamlit changes the DOM). */
+.material-symbols-rounded,
+.material-symbols-outlined,
+.material-symbols-sharp,
+.material-icons,
+span[class*="material-symbols"],
+span[class*="material-icons"] {
+    font-family: 'Material Symbols Rounded',
+                 'Material Symbols Outlined',
+                 'Material Icons' !important;
+    font-size: 0 !important;
+    line-height: 0 !important;
+    color: transparent !important;
 }
 
 /* ── Tighter top padding so content breathes ──────────────────────────── */

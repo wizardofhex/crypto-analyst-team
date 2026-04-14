@@ -644,6 +644,377 @@ div[data-testid="stSpinner"] span { color: var(--muted) !important; }
 </style>
 """, unsafe_allow_html=True)
 
+# ─── Refresh layer: modern SPA polish ─────────────────────────────────────────
+st.markdown("""
+<style>
+/* ────────────────────────────────────────────────────────────────────────
+   REFRESH LAYER — overrides for a cohesive, modern SPA feel.
+   Loaded after the base stylesheet so these rules win on conflict.
+   ──────────────────────────────────────────────────────────────────────── */
+
+:root {
+    --r-radius:        10px;
+    --r-radius-sm:     8px;
+    --r-radius-lg:     14px;
+    --r-pad:           .65rem .9rem;
+    --r-control-h:     38px;
+    --r-shadow:        0 1px 0 rgba(255,255,255,.02) inset, 0 1px 2px rgba(0,0,0,.35);
+    --r-shadow-soft:   0 4px 18px -8px rgba(0,0,0,.55);
+    --r-glow-cyan:     0 0 0 1px rgba(56,208,255,.45), 0 4px 24px -6px rgba(56,208,255,.35);
+    --r-fade-dur:      .28s;
+    --r-ease:          cubic-bezier(.22,.61,.36,1);
+}
+
+/* ── Page fade-in transition (every rerun feels seamless) ──────────────── */
+section[data-testid="stMain"] > div:first-child,
+section.main > div:first-child,
+[data-testid="stAppViewContainer"] section.main > div:first-child {
+    animation: rFadeIn var(--r-fade-dur) var(--r-ease) both;
+}
+@keyframes rFadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Strip every Streamlit radio circle/dot system-wide ────────────────── */
+[data-baseweb="radio"] > div:first-child,
+[data-baseweb="radio"] [role="radio"],
+[data-baseweb="radio"] input[type="radio"] {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+}
+[data-baseweb="radio"] {
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* ── Sidebar nav buttons → SPA pills ───────────────────────────────────── */
+[data-testid="stSidebar"] .nav-shell { margin: .15rem 0 .25rem; }
+
+[data-testid="stSidebar"] [data-testid="stButton"] { margin: 0 !important; }
+[data-testid="stSidebar"] [data-testid="stButton"] > button,
+[data-testid="stSidebar"] [data-testid="baseButton-primary"],
+[data-testid="stSidebar"] [data-testid="baseButton-secondary"] {
+    width: 100% !important;
+    height: 40px !important;
+    padding: 0 .85rem !important;
+    margin: 2px 0 !important;
+    border-radius: var(--r-radius) !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    color: var(--muted) !important;
+    font-family: var(--font-sans) !important;
+    font-weight: 500 !important;
+    font-size: .835rem !important;
+    letter-spacing: .005em !important;
+    text-align: left !important;
+    justify-content: flex-start !important;
+    box-shadow: none !important;
+    transition: background .18s var(--r-ease),
+                color .18s var(--r-ease),
+                border-color .18s var(--r-ease),
+                transform .18s var(--r-ease) !important;
+    position: relative !important;
+}
+[data-testid="stSidebar"] [data-testid="stButton"] > button p,
+[data-testid="stSidebar"] [data-testid="stButton"] > button div {
+    color: inherit !important;
+    font-weight: inherit !important;
+    text-align: left !important;
+    width: 100% !important;
+}
+[data-testid="stSidebar"] [data-testid="stButton"] > button:hover {
+    background: rgba(255,255,255,.025) !important;
+    color: var(--text) !important;
+    border-color: var(--border) !important;
+    transform: translateX(1px) !important;
+}
+/* Active nav (rendered as type="primary") */
+[data-testid="stSidebar"] button[kind="primary"],
+[data-testid="stSidebar"] [data-testid="baseButton-primary"] {
+    background: linear-gradient(135deg, rgba(56,208,255,.14), rgba(0,227,137,.07)) !important;
+    color: var(--text) !important;
+    border-color: rgba(56,208,255,.35) !important;
+    box-shadow: 0 0 0 1px rgba(56,208,255,.18) inset,
+                0 4px 18px -10px rgba(56,208,255,.6) !important;
+}
+[data-testid="stSidebar"] button[kind="primary"]:hover {
+    background: linear-gradient(135deg, rgba(56,208,255,.18), rgba(0,227,137,.1)) !important;
+    transform: none !important;
+}
+[data-testid="stSidebar"] button[kind="primary"]::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 22%; bottom: 22%;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: var(--accent-grad);
+    box-shadow: 0 0 8px rgba(56,208,255,.6);
+}
+
+/* Refresh-data button (last button in sidebar) keeps subtle accent look */
+[data-testid="stSidebar"] button[key="refresh-now"],
+[data-testid="stSidebar"] [data-testid="stButton"]:last-of-type > button {
+    height: 36px !important;
+    background: linear-gradient(180deg, rgba(56,208,255,.05), rgba(0,227,137,.02)) !important;
+    border: 1px solid var(--border2) !important;
+    color: var(--text) !important;
+    justify-content: center !important;
+    font-size: .78rem !important;
+    letter-spacing: .04em !important;
+    text-transform: uppercase !important;
+}
+
+/* ── Main-area buttons (not nav) — modern, tight, accessible ───────────── */
+section[data-testid="stMain"] [data-testid="stButton"] > button,
+section.main [data-testid="stButton"] > button {
+    height: var(--r-control-h);
+    border-radius: var(--r-radius-sm);
+    background: var(--card2);
+    border: 1px solid var(--border2);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-weight: 500;
+    font-size: .82rem;
+    padding: 0 1rem;
+    transition: all .18s var(--r-ease);
+    box-shadow: var(--r-shadow);
+}
+section[data-testid="stMain"] [data-testid="stButton"] > button:hover {
+    border-color: rgba(56,208,255,.5);
+    background: #1a2230;
+    transform: translateY(-1px);
+    box-shadow: var(--r-shadow-soft);
+}
+section[data-testid="stMain"] button[kind="primary"] {
+    background: var(--accent-grad) !important;
+    color: #061018 !important;
+    border-color: transparent !important;
+    font-weight: 600 !important;
+}
+
+/* ── Form inputs — unified height, focus rings ─────────────────────────── */
+[data-baseweb="select"] > div,
+[data-baseweb="input"] > div,
+[data-testid="stTextInput"] input,
+[data-testid="stNumberInput"] input,
+[data-testid="stDateInput"] input {
+    min-height: var(--r-control-h) !important;
+    border-radius: var(--r-radius-sm) !important;
+    background: var(--card) !important;
+    border: 1px solid var(--border) !important;
+    transition: border-color .15s var(--r-ease), box-shadow .15s var(--r-ease) !important;
+    font-family: var(--font-sans) !important;
+}
+[data-baseweb="select"] > div:hover,
+[data-baseweb="input"] > div:hover { border-color: var(--border2) !important; }
+
+[data-baseweb="select"] > div:focus-within,
+[data-baseweb="input"] > div:focus-within,
+[data-testid="stTextInput"] input:focus,
+[data-testid="stNumberInput"] input:focus {
+    border-color: rgba(56,208,255,.55) !important;
+    box-shadow: 0 0 0 3px rgba(56,208,255,.12) !important;
+    outline: none !important;
+}
+
+/* Multiselect tags */
+[data-baseweb="tag"] {
+    background: rgba(56,208,255,.10) !important;
+    border: 1px solid rgba(56,208,255,.25) !important;
+    color: var(--cyan) !important;
+    border-radius: 6px !important;
+    font-weight: 500 !important;
+    font-size: .72rem !important;
+    letter-spacing: .02em !important;
+}
+
+/* Dropdown chevrons (filled SVG paths) */
+[data-baseweb="select"] svg,
+[data-baseweb="select"] svg path {
+    fill: var(--muted) !important;
+    transition: fill .15s var(--r-ease), transform .15s var(--r-ease);
+}
+[data-baseweb="select"]:hover svg,
+[data-baseweb="select"]:hover svg path { fill: var(--cyan) !important; }
+
+/* Listbox / dropdown menu */
+[data-baseweb="popover"] [role="listbox"],
+[data-baseweb="menu"] {
+    background: var(--card2) !important;
+    border: 1px solid var(--border2) !important;
+    border-radius: var(--r-radius) !important;
+    box-shadow: 0 12px 40px -12px rgba(0,0,0,.6) !important;
+    overflow: hidden !important;
+}
+[data-baseweb="popover"] li:hover,
+[data-baseweb="menu"] li:hover {
+    background: rgba(56,208,255,.08) !important;
+    color: var(--text) !important;
+}
+
+/* ── Expanders — clean, no AI-vibes ────────────────────────────────────── */
+[data-testid="stExpander"] {
+    border: 1px solid var(--border) !important;
+    border-radius: var(--r-radius) !important;
+    background: var(--card) !important;
+    overflow: hidden !important;
+    transition: border-color .15s var(--r-ease) !important;
+}
+[data-testid="stExpander"]:hover { border-color: var(--border2) !important; }
+[data-testid="stExpander"] summary {
+    padding: .75rem 1rem !important;
+    font-weight: 500 !important;
+    font-size: .85rem !important;
+    color: var(--text) !important;
+}
+[data-testid="stExpander"] summary:hover { background: rgba(255,255,255,.015) !important; }
+[data-testid="stExpander"] svg { fill: var(--muted) !important; transition: fill .15s var(--r-ease); }
+[data-testid="stExpander"] summary:hover svg { fill: var(--cyan) !important; }
+
+/* ── Tables / dataframes — sharper, mono numerals ──────────────────────── */
+[data-testid="stDataFrame"] {
+    border: 1px solid var(--border) !important;
+    border-radius: var(--r-radius) !important;
+    overflow: hidden !important;
+    background: var(--card) !important;
+}
+[data-testid="stDataFrame"] [role="columnheader"] {
+    background: var(--card2) !important;
+    color: var(--muted) !important;
+    font-weight: 600 !important;
+    font-size: .7rem !important;
+    letter-spacing: .06em !important;
+    text-transform: uppercase !important;
+    border-bottom: 1px solid var(--border2) !important;
+}
+[data-testid="stDataFrame"] [role="row"]:hover [role="gridcell"] {
+    background: rgba(56,208,255,.04) !important;
+}
+[data-testid="stDataFrame"] [role="gridcell"] {
+    font-family: var(--font-mono) !important;
+    font-size: .78rem !important;
+}
+
+/* ── Tabs ──────────────────────────────────────────────────────────────── */
+[data-baseweb="tab-list"] {
+    border-bottom: 1px solid var(--border) !important;
+    gap: .25rem !important;
+}
+[data-baseweb="tab"] {
+    background: transparent !important;
+    color: var(--muted) !important;
+    border: none !important;
+    border-radius: 0 !important;
+    padding: .6rem 1rem !important;
+    font-weight: 500 !important;
+    font-size: .82rem !important;
+    transition: color .15s var(--r-ease) !important;
+}
+[data-baseweb="tab"]:hover { color: var(--text) !important; }
+[data-baseweb="tab"][aria-selected="true"] {
+    color: var(--cyan) !important;
+    border-bottom: 2px solid var(--cyan) !important;
+}
+[data-baseweb="tab-highlight"] { background: var(--accent-grad) !important; height: 2px !important; }
+
+/* ── Metric cards (KPIs) — softer, lifted ──────────────────────────────── */
+[data-testid="stMetric"] {
+    background: var(--card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--r-radius-lg) !important;
+    padding: 1rem 1.1rem !important;
+    transition: border-color .15s var(--r-ease), transform .15s var(--r-ease) !important;
+}
+[data-testid="stMetric"]:hover {
+    border-color: var(--border2) !important;
+    transform: translateY(-1px);
+}
+[data-testid="stMetricLabel"] {
+    color: var(--muted) !important;
+    font-size: .68rem !important;
+    font-weight: 600 !important;
+    letter-spacing: .08em !important;
+    text-transform: uppercase !important;
+}
+[data-testid="stMetricValue"] {
+    font-family: var(--font-mono) !important;
+    font-weight: 600 !important;
+    font-size: 1.5rem !important;
+    color: var(--text) !important;
+}
+
+/* ── Sliders ──────────────────────────────────────────────────────────── */
+[data-baseweb="slider"] [role="slider"] {
+    background: var(--cyan) !important;
+    box-shadow: 0 0 0 4px rgba(56,208,255,.15) !important;
+}
+
+/* ── Scrollbar ────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+    background: var(--border2);
+    border-radius: 10px;
+    border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover { background: #3a4863; }
+
+/* ── Code blocks ──────────────────────────────────────────────────────── */
+code, pre code {
+    font-family: var(--font-mono) !important;
+    background: var(--card2) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 6px !important;
+    padding: .12rem .35rem !important;
+    font-size: .78rem !important;
+}
+pre {
+    background: var(--card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--r-radius) !important;
+}
+
+/* ── Sidebar polish ───────────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+    border-right: 1px solid var(--border) !important;
+    background: linear-gradient(180deg, #0a0f17 0%, #07090f 100%) !important;
+}
+[data-testid="stSidebar"] > div { padding-top: .5rem !important; }
+
+/* ── Hide Streamlit chrome that screams "AI demo" ──────────────────────── */
+[data-testid="stDeployButton"],
+[data-testid="stStatusWidget"],
+header [data-testid="stHeaderActionElements"] { display: none !important; }
+header[data-testid="stHeader"] {
+    background: transparent !important;
+    height: 0 !important;
+}
+
+/* ── Tighter top padding so content breathes ──────────────────────────── */
+section[data-testid="stMain"] .block-container,
+section.main .block-container {
+    padding-top: 1.6rem !important;
+    padding-bottom: 3rem !important;
+    max-width: 1440px !important;
+}
+
+/* ── Tooltip / popovers ───────────────────────────────────────────────── */
+[data-baseweb="tooltip"] {
+    background: var(--card2) !important;
+    border: 1px solid var(--border2) !important;
+    border-radius: 6px !important;
+    color: var(--text) !important;
+    font-size: .72rem !important;
+    box-shadow: 0 8px 24px -8px rgba(0,0,0,.5) !important;
+}
+
+/* ── Selection ────────────────────────────────────────────────────────── */
+::selection { background: rgba(56,208,255,.30); color: var(--text); }
+</style>
+""", unsafe_allow_html=True)
+
 # ─── Plotly base layout (applied to every chart) ──────────────────────────────
 _PL = dict(
     template="plotly_dark",
@@ -898,23 +1269,23 @@ def sidebar() -> str:
             unsafe_allow_html=True,
         )
 
-        # ── Nav ────────────────────────────────────────────────────────────
-        # Build labels with inline SVG icons
-        labels = []
+        # ── Nav (button-based pills, true SPA feel) ────────────────────────
+        if "page" not in st.session_state:
+            st.session_state["page"] = NAV_ITEMS[0][0]
+
+        st.markdown('<div class="nav-shell">', unsafe_allow_html=True)
         for name, icon_name in NAV_ITEMS:
-            ico = _icon(icon_name, 14, "currentColor", 1.8)
-            labels.append(
-                f'<span style="display:inline-flex;align-items:center;gap:.65rem">'
-                f'{ico}<span>{name}</span></span>'
-            )
-        # Streamlit radio can't render HTML in labels directly, so fall back
-        # to text labels but rely on CSS for styling. Use a zero-width prefix
-        # to preserve the mapping back to the clean key.
-        page = st.radio(
-            "nav",
-            [name for name, _ in NAV_ITEMS],
-            label_visibility="collapsed",
-        )
+            is_active = st.session_state["page"] == name
+            if st.button(
+                name,
+                key=f"nav-{name}",
+                use_container_width=True,
+                type="primary" if is_active else "secondary",
+            ):
+                st.session_state["page"] = name
+                st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        page = st.session_state["page"]
 
         st.markdown(
             '<div style="height:1px;background:linear-gradient(90deg,transparent,var(--border2),transparent);'

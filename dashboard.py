@@ -269,10 +269,11 @@ section[data-testid="stSidebar"] * { color: var(--text); }
 [data-testid="stSidebarCollapseButton"] svg {
     width: 16px !important;
     height: 16px !important;
-    stroke: var(--cyan) !important;
-    stroke-width: 2.5 !important;
-    stroke-linecap: round !important;
-    stroke-linejoin: round !important;
+    color: var(--cyan) !important;
+    fill: var(--cyan) !important;
+}
+[data-testid="stSidebarCollapseButton"] svg path {
+    fill: var(--cyan) !important;
 }
 
 /* Sidebar collapsed expand button */
@@ -291,9 +292,10 @@ section[data-testid="stSidebar"] * { color: var(--text); }
     border-color: var(--cyan) !important;
 }
 [data-testid="stSidebarCollapsedControl"] svg {
-    stroke: var(--cyan) !important;
-    stroke-width: 2.5 !important;
+    color: var(--cyan) !important;
+    fill: var(--cyan) !important;
 }
+[data-testid="stSidebarCollapsedControl"] svg path { fill: var(--cyan) !important; }
 
 /* Page header */
 .page-head {
@@ -469,11 +471,12 @@ div[data-testid="stExpander"]    { border: 1px solid var(--border); border-radiu
 div[data-testid="stExpander"] summary { color: var(--text) !important; font-weight: 500;
                                          padding: .6rem .9rem !important; }
 div[data-testid="stExpander"] summary:hover { color: var(--cyan) !important; }
-/* Restyle expander arrow */
+/* Restyle expander arrow — Streamlit uses a filled triangle */
 div[data-testid="stExpander"] summary svg {
-    stroke: var(--cyan) !important;
-    stroke-width: 2.5 !important;
+    color: var(--cyan) !important;
+    fill: var(--cyan) !important;
 }
+div[data-testid="stExpander"] summary svg path { fill: var(--cyan) !important; }
 
 /* ── Dataframe / Table — full dark theme ── */
 div[data-testid="stDataFrame"]   { border: 1px solid var(--border); border-radius: 6px;
@@ -511,13 +514,15 @@ div[data-testid="stTable"] td    { background: var(--card) !important;
 ::-webkit-scrollbar-thumb        { background: var(--border); border-radius: 3px; }
 
 /* ── Top toolbar / header bar ── */
-header[data-testid="stHeader"]   { background: var(--bg) !important;
-                                   border-bottom: 1px solid var(--border) !important; }
-div[data-testid="stToolbar"]     { background: transparent !important; display: none !important; }
+header[data-testid="stHeader"]   { background: transparent !important;
+                                   border-bottom: 1px solid var(--border) !important;
+                                   height: auto !important; }
+div[data-testid="stToolbar"]     { background: transparent !important; }
 div[data-testid="stDecoration"]  { background: transparent !important; display: none !important; }
 div[data-testid="stStatusWidget"]{ background: var(--card) !important;
                                    color: var(--text) !important; }
-div[data-testid="stDeployButton"]{ display: none !important; }
+/* Hide only the Deploy button — keep the toolbar / menu intact */
+div[data-testid="stDeployButton"] { display: none !important; }
 
 /* ── Sidebar Radio buttons — styled as nav items ── */
 section[data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] {
@@ -584,12 +589,15 @@ section[data-testid="stSidebar"] [data-baseweb="radio"] label { color: inherit !
     background: var(--border) !important;
 }
 
-/* ── Select boxes / dropdowns ── */
+/* ── Select boxes / dropdowns ──
+   Streamlit/baseweb chevrons are FILLED paths, so we color them via `fill`
+   (not stroke). Any stroke override here makes the chevron disappear. */
 div[data-baseweb="select"] > div { background: var(--card) !important;
                                    border-color: var(--border) !important;
                                    color: var(--text) !important; }
 div[data-baseweb="select"] span  { color: var(--text) !important; }
-div[data-baseweb="select"] svg   { stroke: var(--cyan) !important; stroke-width: 2.5 !important; }
+div[data-baseweb="select"] svg   { fill: var(--cyan) !important; color: var(--cyan) !important; }
+div[data-baseweb="select"] svg path { fill: var(--cyan) !important; }
 [data-baseweb="popover"] ul      { background: var(--card) !important;
                                    border: 1px solid var(--border) !important; }
 [data-baseweb="popover"] li      { color: var(--text) !important; }
@@ -599,11 +607,13 @@ div[data-baseweb="select"] svg   { stroke: var(--cyan) !important; stroke-width:
 [data-baseweb="tag"]             { background: var(--card2) !important;
                                    border-color: var(--border) !important;
                                    color: var(--text) !important; }
-[data-baseweb="tag"] svg         { stroke: var(--muted) !important; stroke-width: 2.5 !important; }
-[data-baseweb="tag"] svg:hover   { stroke: var(--text) !important; }
+[data-baseweb="tag"] svg         { fill: var(--muted) !important; color: var(--muted) !important; }
+[data-baseweb="tag"] svg path    { fill: var(--muted) !important; }
+[data-baseweb="tag"]:hover svg   { fill: var(--text) !important; color: var(--text) !important; }
+[data-baseweb="tag"]:hover svg path { fill: var(--text) !important; }
 
 /* ── Date input ── */
-div[data-baseweb="input"] svg    { stroke: var(--cyan) !important; stroke-width: 2 !important; }
+div[data-baseweb="input"] svg    { fill: var(--cyan) !important; color: var(--cyan) !important; }
 
 /* ── Checkbox ── */
 div[data-testid="stCheckbox"] label span { color: var(--text) !important; }

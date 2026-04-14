@@ -8,7 +8,10 @@ Launch:  streamlit run dashboard.py
 import io
 import time
 import json
+import base64
 import sqlite3
+import functools
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 
@@ -155,14 +158,47 @@ def _icon(name: str, size: int = 16, color: str = "currentColor", stroke: float 
     )
 
 
+# Logo directory convention: drop branded PNGs into ./assets/logos/ named
+# after the NAV_ITEMS icon key ("grid.png", "trophy.png", "pulse.png",
+# "trend-up.png", "list.png", "hex.png", "brain.png"). If a matching file
+# exists we use it as the page header logo; otherwise we fall back to the
+# inline SVG icon set. 512x512 PNG with transparent background works best.
+_LOGO_DIR = Path(__file__).parent / "assets" / "logos"
+
+@functools.lru_cache(maxsize=32)
+def _logo_data_uri(icon_name: str) -> Optional[str]:
+    """Return a base64 data URI for assets/logos/{icon_name}.(png|svg|webp)
+    or None if no logo file is present."""
+    for ext in ("png", "svg", "webp", "jpg", "jpeg"):
+        p = _LOGO_DIR / f"{icon_name}.{ext}"
+        if p.exists():
+            mime = {"png": "image/png", "svg": "image/svg+xml",
+                    "webp": "image/webp", "jpg": "image/jpeg",
+                    "jpeg": "image/jpeg"}[ext]
+            data = base64.b64encode(p.read_bytes()).decode("ascii")
+            return f"data:{mime};base64,{data}"
+    return None
+
+
 def page_title(icon_name: str, title: str, subtitle: str = "") -> None:
-    """Render a clean page header with SVG icon and optional subtitle."""
+    """Render a clean page header. Uses a branded logo image if one exists
+    at assets/logos/{icon_name}.png, otherwise falls back to the SVG icon."""
     sub_html = (
         f'<div class="page-sub">{subtitle}</div>' if subtitle else ""
     )
+    logo_uri = _logo_data_uri(icon_name)
+    if logo_uri:
+        icon_html = (
+            f'<img src="{logo_uri}" alt="{title}" '
+            f'style="width:100%;height:100%;object-fit:contain;display:block"/>'
+        )
+        tile_cls = "page-head-ico branded"
+    else:
+        icon_html = _icon(icon_name, 20, "url(#grad-accent)")
+        tile_cls = "page-head-ico"
     st.markdown(
         f'<div class="page-head">'
-        f'<div class="page-head-ico">{_icon(icon_name, 20, "url(#grad-accent)")}</div>'
+        f'<div class="{tile_cls}">{icon_html}</div>'
         f'<div><div class="page-head-title">{title}</div>{sub_html}</div>'
         f'</div>'
         # Gradient def used by icons that reference url(#grad-accent)
@@ -305,12 +341,22 @@ section[data-testid="stSidebar"] * { color: var(--text); }
     border-bottom: 1px solid var(--border);
 }
 .page-head-ico {
-    width: 38px; height: 38px; border-radius: 10px;
+    width: 44px; height: 44px; border-radius: 12px;
     background: linear-gradient(135deg, rgba(56,208,255,.12), rgba(0,227,137,.12));
     border: 1px solid var(--border2);
     display: flex; align-items: center; justify-content: center;
     flex-shrink: 0;
+    overflow: hidden;
 }
+.page-head-ico.branded {
+    /* When a branded logo image is present, remove the tinted tile so
+       the artwork reads cleanly. */
+    background: transparent;
+    border: 1px solid var(--border);
+    padding: 4px;
+    box-shadow: 0 2px 12px -4px rgba(0,0,0,.45);
+}
+.page-head-ico.branded img { border-radius: 8px; }
 .page-head-title {
     font-size: 1.35rem; font-weight: 700;
     letter-spacing: -0.01em; color: var(--text);
@@ -854,22 +900,83 @@ section[data-testid="stMain"] button[kind="primary"] {
     color: var(--text) !important;
 }
 
-/* ── Expanders — clean, no AI-vibes ────────────────────────────────────── */
+/* ── Expanders — clean, no AI-vibes, no ligature leakage ───────────────── */
 [data-testid="stExpander"] {
     border: 1px solid var(--border) !important;
     border-radius: var(--r-radius) !important;
     background: var(--card) !important;
     overflow: hidden !important;
-    transition: border-color .15s var(--r-ease) !important;
+    transition: border-color .15s var(--r-ease), box-shadow .15s var(--r-ease) !important;
 }
-[data-testid="stExpander"]:hover { border-color: var(--border2) !important; }
-[data-testid="stExpander"] summary {
-    padding: .75rem 1rem !important;
+[data-testid="stExpander"]:hover {
+    border-color: rgba(56,208,255,.35) !important;
+    box-shadow: 0 4px 18px -12px rgba(56,208,255,.35) !important;
+}
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] details > summary,
+[data-testid="stExpander"] [data-testid="stExpanderToggleIcon"] ~ *,
+[data-testid="stExpander"] button[kind="headerNoPadding"] {
+    padding: .8rem 1.1rem !important;
     font-weight: 500 !important;
     font-size: .85rem !important;
     color: var(--text) !important;
+    cursor: pointer !important;
+    transition: color .15s var(--r-ease), background .15s var(--r-ease) !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: .6rem !important;
 }
-[data-testid="stExpander"] summary:hover { background: rgba(255,255,255,.015) !important; }
+[data-testid="stExpander"] summary:hover,
+[data-testid="stExpander"] summary:hover *,
+[data-testid="stExpander"] button[kind="headerNoPadding"]:hover,
+[data-testid="stExpander"] button[kind="headerNoPadding"]:hover * {
+    color: var(--cyan) !important;
+    background: rgba(56,208,255,.04) !important;
+}
+
+/* Nuke any Material Symbols ligature text inside the expander header
+   (the "keyboard_arrow_right" / "arrow_right" etc. glyph fallbacks). */
+[data-testid="stExpander"] summary [class*="material"],
+[data-testid="stExpander"] summary [class*="Material"],
+[data-testid="stExpander"] summary [class*="icon"] span,
+[data-testid="stExpander"] summary span[aria-label],
+[data-testid="stExpander"] [data-testid="stExpanderToggleIcon"],
+[data-testid="stExpanderToggleIcon"],
+[data-testid="stExpander"] summary svg + span,
+[data-testid="stExpander"] button[kind="headerNoPadding"] [class*="material"],
+[data-testid="stExpander"] button[kind="headerNoPadding"] [class*="Material"] {
+    font-size: 0 !important;
+    line-height: 0 !important;
+    width: 0 !important;
+    height: 0 !important;
+    color: transparent !important;
+    overflow: hidden !important;
+    display: inline-block !important;
+}
+
+/* Our own chevron (CSS-only, no font needed) as the LAST child of summary */
+[data-testid="stExpander"] summary::after,
+[data-testid="stExpander"] details > summary::after {
+    content: "";
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-right: 1.6px solid var(--muted);
+    border-bottom: 1.6px solid var(--muted);
+    transform: rotate(45deg) translate(-2px, -2px);
+    margin-left: auto;
+    transition: transform .22s var(--r-ease), border-color .15s var(--r-ease);
+    flex-shrink: 0;
+}
+[data-testid="stExpander"] details[open] > summary::after {
+    transform: rotate(225deg) translate(-2px, -2px);
+}
+[data-testid="stExpander"] summary:hover::after,
+[data-testid="stExpander"] details > summary:hover::after {
+    border-color: var(--cyan) !important;
+}
+
+/* Streamlit's own SVG chevron (if present) — recolor + hide ligature text */
 [data-testid="stExpander"] svg { fill: var(--muted) !important; transition: fill .15s var(--r-ease); }
 [data-testid="stExpander"] summary:hover svg { fill: var(--cyan) !important; }
 
@@ -1189,8 +1296,17 @@ def fetch_sparkline(symbol: str, days: int = 7) -> List[float]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def fp(v: Optional[float]) -> str:
-    """Format a price value."""
+    """Format a price value. Safe against None and NaN."""
     if v is None:
+        return "—"
+    try:
+        if pd.isna(v):
+            return "—"
+    except (TypeError, ValueError):
+        pass
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
         return "—"
     if v < 0.001:
         return f"${v:.6f}"
@@ -1991,8 +2107,18 @@ def page_history():
 
     disp["timestamp"]   = disp["timestamp"].dt.strftime("%Y-%m-%d %H:%M")
     disp["entry_price"] = disp["entry_price"].apply(fp)
-    disp["close_price"] = disp["close_price"].apply(fp)
-    disp["outcome_pct"] = disp["outcome_pct"].apply(lambda x: fpc(x) if x is not None else "OPEN")
+    # Exit: show "OPEN" for unclosed positions (NaN), else formatted price.
+    def _fmt_exit(v):
+        try:
+            if v is None or pd.isna(v):
+                return "OPEN"
+        except (TypeError, ValueError):
+            pass
+        return fp(v)
+    disp["close_price"] = disp["close_price"].apply(_fmt_exit)
+    disp["outcome_pct"] = disp["outcome_pct"].apply(
+        lambda x: fpc(x) if (x is not None and not (isinstance(x, float) and x != x)) else "OPEN"
+    )
     disp["thesis"]      = disp["thesis"].apply(
         lambda x: str(x)[:90] + "…" if x and len(str(x)) > 90 else (x or "—"))
     disp.columns = ["Date","Analyst","Coin","Direction","Entry","Exit","Return %","Conf","Status","Thesis","Pos Size $","P&L $"]

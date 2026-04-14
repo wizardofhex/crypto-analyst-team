@@ -1,19 +1,22 @@
 """
-dashboard.py — Professional Streamlit trading analytics dashboard
-for the Crypto Analyst Team system.
+dashboard.py — Crypto Analyst Team dashboard.
+
+A minimal, Linear/Vercel-inspired analytics UI built on Streamlit.
+All rendering paths are null-safe: NaN, None and missing columns never leak
+to the UI — they render as an em-dash or a contextual placeholder.
 
 Launch:  streamlit run dashboard.py
 """
 
-import io
-import time
-import json
+from __future__ import annotations
+
 import base64
-import sqlite3
 import functools
-from pathlib import Path
+import sqlite3
+import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -24,37 +27,50 @@ import streamlit as st
 
 from config import DB_PATH, ANALYST_ORDER, COINGECKO_BASE, SYMBOL_TO_CG_ID
 
-# ─── Configuration ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# CONFIG
+# ══════════════════════════════════════════════════════════════════════════════
+
 ALT_ME_BASE = "https://api.alternative.me"
 AUTO_REFRESH_SEC = 60
+CG_ID = SYMBOL_TO_CG_ID
+EM_DASH = "—"
+
+# Chart-series color palette (only used for plotly traces, not UI chrome).
 ANALYST_COLORS: Dict[str, str] = {
-    "ARIA":   "#00d4ff",   # cyan
-    "MARCUS": "#ffd700",   # gold
-    "NOVA":   "#d966ff",   # violet
-    "VEGA":   "#4a90ff",   # bright blue
-    "DELTA":  "#00e5ff",   # bright cyan
-    "CHAIN":  "#e0e0e0",   # bright white
-    "QUANT":  "#ffeb3b",   # bright yellow
-    "DEFI":   "#69f0ae",   # bright green
-    "ATLAS":  "#ea80fc",   # bright magenta
-    "REX":    "#00ff88",   # neon green
-    "ZEN":    "#ff4757",   # neon red
+    "ARIA":   "#60a5fa",
+    "MARCUS": "#fbbf24",
+    "NOVA":   "#c084fc",
+    "VEGA":   "#38bdf8",
+    "DELTA":  "#06b6d4",
+    "CHAIN":  "#e4e4e7",
+    "QUANT":  "#facc15",
+    "DEFI":   "#34d399",
+    "ATLAS":  "#f472b6",
+    "REX":    "#10b981",
+    "ZEN":    "#ef4444",
 }
 
-# Use the canonical symbol map from config (avoids duplication / drift)
-CG_ID = SYMBOL_TO_CG_ID
+# Semantic colors.
+C_POS  = "#10b981"
+C_NEG  = "#ef4444"
+C_WARN = "#f59e0b"
+C_ACC  = "#60a5fa"
+C_GRID = "#1f1f1f"
+C_AXIS = "#2a2a2a"
+C_TEXT = "#a1a1aa"
 
-# ─── Page config (must be first Streamlit call) ────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE CONFIG (must be first Streamlit call)
+# ══════════════════════════════════════════════════════════════════════════════
+
 _FAVICON_SVG = (
     "data:image/svg+xml;utf8,"
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
-    "<defs><linearGradient id='g' x1='0' x2='1' y1='0' y2='1'>"
-    "<stop offset='0' stop-color='%2300d4ff'/><stop offset='1' stop-color='%2300ff88'/>"
-    "</linearGradient></defs>"
-    "<rect x='2' y='2' width='28' height='28' rx='6' fill='%230d1117' stroke='url(%23g)' stroke-width='1.5'/>"
-    "<path d='M7 21 L13 14 L17 18 L25 9' fill='none' stroke='url(%23g)' stroke-width='2.2' "
-    "stroke-linecap='round' stroke-linejoin='round'/>"
-    "<circle cx='25' cy='9' r='1.8' fill='%2300ff88'/>"
+    "<rect x='2' y='2' width='28' height='28' rx='6' fill='%230a0a0a' "
+    "stroke='%23fafafa' stroke-width='1.5'/>"
+    "<path d='M7 21 L13 14 L17 18 L25 9' fill='none' stroke='%23fafafa' "
+    "stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/>"
     "</svg>"
 )
 
@@ -65,110 +81,60 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ICON SYSTEM
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ─── Inline SVG icon system ───────────────────────────────────────────────────
-def _icon(name: str, size: int = 16, color: str = "currentColor", stroke: float = 1.75) -> str:
-    """Return inline SVG markup for a named icon (Lucide-inspired, stroke-only)."""
-    s = size
-    sw = stroke
+def _icon(name: str, size: int = 16, color: str = "currentColor",
+          stroke: float = 1.75) -> str:
+    """Return inline SVG markup for a named icon (Lucide-style, stroke-only)."""
     paths = {
-        "grid":
-            f'<rect x="3" y="3" width="7" height="7" rx="1"/>'
-            f'<rect x="14" y="3" width="7" height="7" rx="1"/>'
-            f'<rect x="3" y="14" width="7" height="7" rx="1"/>'
-            f'<rect x="14" y="14" width="7" height="7" rx="1"/>',
-        "trophy":
-            f'<path d="M6 4h12v4a6 6 0 0 1-12 0z"/>'
-            f'<path d="M6 6H3a2 2 0 0 0 0 4h3"/>'
-            f'<path d="M18 6h3a2 2 0 0 1 0 4h-3"/>'
-            f'<path d="M10 14h4v3h2v3H8v-3h2z"/>',
-        "pulse":
-            f'<path d="M3 12h4l2-6 4 12 2-6h6"/>',
-        "trend-up":
-            f'<polyline points="3 17 9 11 13 15 21 7"/>'
-            f'<polyline points="15 7 21 7 21 13"/>',
-        "list":
-            f'<line x1="8" y1="6" x2="21" y2="6"/>'
-            f'<line x1="8" y1="12" x2="21" y2="12"/>'
-            f'<line x1="8" y1="18" x2="21" y2="18"/>'
-            f'<circle cx="4" cy="6" r="1"/>'
-            f'<circle cx="4" cy="12" r="1"/>'
-            f'<circle cx="4" cy="18" r="1"/>',
-        "hex":
-            f'<path d="M12 2 21 7v10l-9 5-9-5V7z"/>'
-            f'<path d="M12 8v8M8.5 10v4M15.5 10v4"/>',
-        "brain":
-            f'<path d="M9 4a3 3 0 0 0-3 3v1a3 3 0 0 0-2 2.8A3 3 0 0 0 5 14a3 3 0 0 0 .5 3A3 3 0 0 0 9 20h.5V4H9z"/>'
-            f'<path d="M15 4a3 3 0 0 1 3 3v1a3 3 0 0 1 2 2.8A3 3 0 0 1 19 14a3 3 0 0 1-.5 3A3 3 0 0 1 15 20h-.5V4H15z"/>',
-        "refresh":
-            f'<polyline points="3 4 3 10 9 10"/>'
-            f'<polyline points="21 20 21 14 15 14"/>'
-            f'<path d="M20 10A8 8 0 0 0 6 6L3 10M21 14a8 8 0 0 1-14 4l-3-4"/>',
-        "download":
-            f'<path d="M12 3v12"/>'
-            f'<polyline points="7 10 12 15 17 10"/>'
-            f'<path d="M4 19h16"/>',
-        "filter":
-            f'<path d="M3 5h18l-7 9v6l-4-2v-4z"/>',
-        "dot":
-            f'<circle cx="12" cy="12" r="4"/>',
-        "sparkle":
-            f'<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
-        "shield":
-            f'<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/>',
-        "logo":
-            f'<path d="M4 18 10 10 14 14 22 4" stroke-linecap="round" stroke-linejoin="round"/>'
-            f'<circle cx="22" cy="4" r="1.5" fill="{color}" stroke="none"/>'
-            f'<line x1="3" y1="21" x2="21" y2="21" stroke-linecap="round"/>',
-        "chevron-right":
-            f'<polyline points="9 18 15 12 9 6"/>',
-        "chevron-left":
-            f'<polyline points="15 18 9 12 15 6"/>',
-        "chevron-down":
-            f'<polyline points="6 9 12 15 18 9"/>',
-        "chevron-up":
-            f'<polyline points="18 15 12 9 6 15"/>',
-        "close":
-            f'<line x1="6" y1="6" x2="18" y2="18"/>'
-            f'<line x1="18" y1="6" x2="6" y2="18"/>',
-        "calendar":
-            f'<rect x="3" y="4" width="18" height="18" rx="2"/>'
-            f'<path d="M7 2v4M17 2v4M3 10h18"/>',
-        "search":
-            f'<circle cx="11" cy="11" r="7"/>'
-            f'<path d="M20 20l-4.35-4.35"/>',
-        "external-link":
-            f'<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h6"/>'
-            f'<polyline points="15 3 21 3 21 9"/>',
-        "circle-check":
-            f'<circle cx="12" cy="12" r="9"/>'
-            f'<polyline points="8 12 11 15 16 9"/>',
-        "circle-x":
-            f'<circle cx="12" cy="12" r="9"/>'
-            f'<line x1="8" y1="8" x2="16" y2="16"/>'
-            f'<line x1="16" y1="8" x2="8" y2="16"/>',
-        "activity":
-            f'<polyline points="3 12 6 8 10 16 14 8 18 12 21 12"/>',
+        "grid":        '<rect x="3" y="3" width="7" height="7" rx="1"/>'
+                       '<rect x="14" y="3" width="7" height="7" rx="1"/>'
+                       '<rect x="3" y="14" width="7" height="7" rx="1"/>'
+                       '<rect x="14" y="14" width="7" height="7" rx="1"/>',
+        "trophy":      '<path d="M6 4h12v4a6 6 0 0 1-12 0z"/>'
+                       '<path d="M6 6H3a2 2 0 0 0 0 4h3"/>'
+                       '<path d="M18 6h3a2 2 0 0 1 0 4h-3"/>'
+                       '<path d="M10 14h4v3h2v3H8v-3h2z"/>',
+        "pulse":       '<path d="M3 12h4l2-6 4 12 2-6h6"/>',
+        "trend-up":    '<polyline points="3 17 9 11 13 15 21 7"/>'
+                       '<polyline points="15 7 21 7 21 13"/>',
+        "list":        '<line x1="8" y1="6" x2="21" y2="6"/>'
+                       '<line x1="8" y1="12" x2="21" y2="12"/>'
+                       '<line x1="8" y1="18" x2="21" y2="18"/>'
+                       '<circle cx="4" cy="6" r="1"/>'
+                       '<circle cx="4" cy="12" r="1"/>'
+                       '<circle cx="4" cy="18" r="1"/>',
+        "hex":         '<path d="M12 2 21 7v10l-9 5-9-5V7z"/>',
+        "brain":       '<path d="M9 4a3 3 0 0 0-3 3v1a3 3 0 0 0-2 2.8A3 3 0 0 0 5 14a3 3 0 0 0 .5 3A3 3 0 0 0 9 20h.5V4H9z"/>'
+                       '<path d="M15 4a3 3 0 0 1 3 3v1a3 3 0 0 1 2 2.8A3 3 0 0 1 19 14a3 3 0 0 1-.5 3A3 3 0 0 1 15 20h-.5V4H15z"/>',
+        "refresh":     '<polyline points="3 4 3 10 9 10"/>'
+                       '<polyline points="21 20 21 14 15 14"/>'
+                       '<path d="M20 10A8 8 0 0 0 6 6L3 10M21 14a8 8 0 0 1-14 4l-3-4"/>',
+        "dot":         '<circle cx="12" cy="12" r="4"/>',
+        "logo":        '<path d="M4 18 10 10 14 14 22 4" stroke-linecap="round" stroke-linejoin="round"/>'
+                       '<line x1="3" y1="21" x2="21" y2="21" stroke-linecap="round"/>',
+        "shield":      '<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/>',
+        "info":        '<circle cx="12" cy="12" r="9"/>'
+                       '<line x1="12" y1="16" x2="12" y2="12"/>'
+                       '<line x1="12" y1="8" x2="12" y2="8"/>',
     }
     body = paths.get(name, paths["dot"])
     return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{s}" height="{s}" viewBox="0 0 24 24" '
-        f'fill="none" stroke="{color}" stroke-width="{sw}" stroke-linecap="round" '
-        f'stroke-linejoin="round" style="vertical-align:-2px;display:inline-block">{body}</svg>'
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '
+        f'viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="{stroke}" '
+        f'stroke-linecap="round" stroke-linejoin="round" '
+        f'style="vertical-align:-2px;display:inline-block;flex-shrink:0">{body}</svg>'
     )
 
 
-# Logo directory convention: drop branded PNGs into ./assets/logos/ named
-# after the NAV_ITEMS icon key ("grid.png", "trophy.png", "pulse.png",
-# "trend-up.png", "list.png", "hex.png", "brain.png"). If a matching file
-# exists we use it as the page header logo; otherwise we fall back to the
-# inline SVG icon set. 512x512 PNG with transparent background works best.
+# Branded logos: assets/logos/{key}.png wins over the inline SVG fallback.
 _LOGO_DIR = Path(__file__).parent / "assets" / "logos"
+
 
 @functools.lru_cache(maxsize=32)
 def _logo_data_uri(icon_name: str) -> Optional[str]:
-    """Return a base64 data URI for assets/logos/{icon_name}.(png|svg|webp)
-    or None if no logo file is present."""
     for ext in ("png", "svg", "webp", "jpg", "jpeg"):
         p = _LOGO_DIR / f"{icon_name}.{ext}"
         if p.exists():
@@ -181,1015 +147,643 @@ def _logo_data_uri(icon_name: str) -> Optional[str]:
 
 
 def page_title(icon_name: str, title: str, subtitle: str = "") -> None:
-    """Render a clean page header. Uses a branded logo image if one exists
-    at assets/logos/{icon_name}.png, otherwise falls back to the SVG icon."""
-    sub_html = (
-        f'<div class="page-sub">{subtitle}</div>' if subtitle else ""
-    )
+    """Render the page header block (logo tile + title + optional subtitle)."""
     logo_uri = _logo_data_uri(icon_name)
     if logo_uri:
         icon_html = (
             f'<img src="{logo_uri}" alt="{title}" '
-            f'style="width:100%;height:100%;object-fit:contain;display:block"/>'
+            'style="width:100%;height:100%;object-fit:contain;display:block"/>'
         )
-        tile_cls = "page-head-ico branded"
+        tile_cls = "ph-ico branded"
     else:
-        icon_html = _icon(icon_name, 20, "url(#grad-accent)")
-        tile_cls = "page-head-ico"
+        icon_html = _icon(icon_name, 20, "currentColor")
+        tile_cls = "ph-ico"
+    sub_html = f'<div class="ph-sub">{subtitle}</div>' if subtitle else ""
     st.markdown(
-        f'<div class="page-head">'
+        f'<div class="ph">'
         f'<div class="{tile_cls}">{icon_html}</div>'
-        f'<div><div class="page-head-title">{title}</div>{sub_html}</div>'
-        f'</div>'
-        # Gradient def used by icons that reference url(#grad-accent)
-        f'<svg width="0" height="0" style="position:absolute">'
-        f'<defs><linearGradient id="grad-accent" x1="0" x2="1" y1="0" y2="1">'
-        f'<stop offset="0" stop-color="#00d4ff"/><stop offset="1" stop-color="#00ff88"/>'
-        f'</linearGradient></defs></svg>',
+        f'<div class="ph-text"><div class="ph-title">{title}</div>{sub_html}</div>'
+        f'</div>',
         unsafe_allow_html=True,
     )
 
-# ─── Global CSS — refined Web 3.0 trading terminal ────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CSS — Linear / Vercel minimal
+# ══════════════════════════════════════════════════════════════════════════════
+
 st.markdown("""
 <style>
-/* ── Fonts ── */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-/* ── Variables ── */
 :root {
-    --bg:         #07090f;
-    --bg-grad:    radial-gradient(1100px 600px at 85% -10%, rgba(0,212,255,.07), transparent 55%),
-                  radial-gradient(900px 500px at -10% 110%, rgba(0,255,136,.05), transparent 55%),
-                  #07090f;
-    --card:       #0f141d;
-    --card2:      #151b27;
-    --card3:      #1a2130;
-    --border:     #1f2937;
-    --border2:    #2a3447;
-    --text:       #e6edf3;
-    --muted:      #8b94a3;
-    --dim:        #4a5263;
-    --green:      #00e389;
-    --red:        #ff5470;
-    --yellow:     #ffc857;
-    --cyan:       #38d0ff;
-    --violet:     #b47cff;
-    --blue:       #5ea3ff;
-    --accent-grad: linear-gradient(135deg, #38d0ff 0%, #00e389 100%);
+    --bg:         #0a0a0a;
+    --card:       #0f0f0f;
+    --card-2:     #141414;
+    --elevated:   #1a1a1a;
+    --border:     #1f1f1f;
+    --border-2:   #262626;
+    --border-3:   #3f3f46;
+    --text:       #fafafa;
+    --text-2:     #e4e4e7;
+    --muted:      #a1a1aa;
+    --dim:        #71717a;
+    --subtle:     #52525b;
+    --accent:     #60a5fa;
+    --pos:        #10b981;
+    --neg:        #ef4444;
+    --warn:       #f59e0b;
     --font-sans:  'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    --font-mono:  'JetBrains Mono', 'SF Mono', Menlo, monospace;
+    --font-mono:  'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+    --radius-sm:  4px;
+    --radius:     6px;
+    --radius-lg:  8px;
 }
 
-/* App background — layered gradient for depth */
-.stApp                          { background: var(--bg-grad) !important; }
-.stApp > header                 { background: transparent !important; }
-.main .block-container          { padding: 1.5rem 2.25rem 3rem; max-width: 1440px; }
-
-/* Global typography */
-html, body, .stApp, .stApp * {
-    font-family: var(--font-sans);
+/* ── Base ─────────────────────────────────────────────────────────────────── */
+html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
+    background: var(--bg) !important;
+    color: var(--text) !important;
+    font-family: var(--font-sans) !important;
+    font-feature-settings: "cv11", "ss01";
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
 }
-.stApp code, .stApp pre, .kpi-val, .stDataFrame td, .stDataFrame th {
-    font-family: var(--font-mono) !important;
-}
+.stApp, .stApp * { box-sizing: border-box; }
+p, span, div, label, li { color: inherit; }
 
-/* Sidebar */
-section[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #05070c 0%, #090d14 100%) !important;
-    border-right: 1px solid var(--border);
-}
-section[data-testid="stSidebar"] * { color: var(--text); }
-
-/* Brand block in sidebar */
-.brand {
-    display: flex; align-items: center; gap: .6rem;
-    padding: .9rem .5rem .25rem;
-}
-.brand-mark {
-    width: 34px; height: 34px; border-radius: 9px;
-    background: linear-gradient(135deg, rgba(56,208,255,.18), rgba(0,227,137,.18));
-    border: 1px solid var(--border2);
-    display: flex; align-items: center; justify-content: center;
-}
-.brand-text-wrap { line-height: 1.1; }
-.brand-name {
-    font-weight: 700; font-size: .92rem;
-    letter-spacing: .02em; color: var(--text);
-}
-.brand-sub {
-    font-size: .58rem; letter-spacing: .22em;
-    color: var(--muted); text-transform: uppercase; margin-top: 2px;
-}
-
-/* Sidebar nav items — custom list */
-.nav-list { display: flex; flex-direction: column; gap: 2px; margin-top: .4rem; }
-
-/* Sidebar collapse button — restyle Streamlit chevron */
-[data-testid="stSidebarCollapseButton"] {
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    width: 32px !important;
-    height: 32px !important;
-    border-radius: 6px !important;
-    transition: all 0.2s ease !important;
-    background: transparent !important;
-    border: 1px solid var(--border) !important;
-}
-[data-testid="stSidebarCollapseButton"]:hover {
-    background: rgba(56,208,255,.08) !important;
-    border-color: var(--cyan) !important;
-}
-[data-testid="stSidebarCollapseButton"] svg {
-    width: 16px !important;
-    height: 16px !important;
-    color: var(--cyan) !important;
-    fill: var(--cyan) !important;
-}
-[data-testid="stSidebarCollapseButton"] svg path {
-    fill: var(--cyan) !important;
-}
-
-/* Sidebar collapsed expand button */
-[data-testid="stSidebarCollapsedControl"] {
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-}
-[data-testid="stSidebarCollapsedControl"] button {
-    border-radius: 6px !important;
-    background: var(--card) !important;
-    border: 1px solid var(--border) !important;
-}
-[data-testid="stSidebarCollapsedControl"] button:hover {
-    background: rgba(56,208,255,.08) !important;
-    border-color: var(--cyan) !important;
-}
-[data-testid="stSidebarCollapsedControl"] svg {
-    color: var(--cyan) !important;
-    fill: var(--cyan) !important;
-}
-[data-testid="stSidebarCollapsedControl"] svg path { fill: var(--cyan) !important; }
-
-/* Page header */
-.page-head {
-    display: flex; align-items: center; gap: .85rem;
-    margin: .1rem 0 1.25rem;
-    padding-bottom: .9rem;
-    border-bottom: 1px solid var(--border);
-}
-.page-head-ico {
-    width: 44px; height: 44px; border-radius: 12px;
-    background: linear-gradient(135deg, rgba(56,208,255,.12), rgba(0,227,137,.12));
-    border: 1px solid var(--border2);
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-    overflow: hidden;
-}
-.page-head-ico.branded {
-    /* When a branded logo image is present, remove the tinted tile so
-       the artwork reads cleanly. */
-    background: transparent;
-    border: 1px solid var(--border);
-    padding: 4px;
-    box-shadow: 0 2px 12px -4px rgba(0,0,0,.45);
-}
-.page-head-ico.branded img { border-radius: 8px; }
-.page-head-title {
-    font-size: 1.35rem; font-weight: 700;
-    letter-spacing: -0.01em; color: var(--text);
-    line-height: 1.15;
-}
-.page-sub {
-    font-size: .78rem; color: var(--muted);
-    margin-top: 3px; font-weight: 400;
-}
-
-/* KPI cards — glass/depth */
-.kpi {
-    background: linear-gradient(180deg, var(--card) 0%, var(--card2) 100%);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 1.1rem 1.3rem;
-    text-align: left;
-    position: relative;
-    overflow: hidden;
-    height: 116px;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    transition: border-color .2s, transform .2s;
-}
-.kpi:hover {
-    border-color: var(--border2);
-    transform: translateY(-1px);
-}
-.kpi::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, var(--cyan), var(--green), transparent);
-    opacity: .6;
-}
-.kpi::after {
-    content: '';
-    position: absolute;
-    right: -40px; top: -40px;
-    width: 120px; height: 120px;
-    background: radial-gradient(circle, rgba(56,208,255,.06), transparent 60%);
-    pointer-events: none;
-}
-.kpi-label {
-    font-size: 0.63rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.14em;
-    margin-bottom: 0.45rem;
-    font-weight: 600;
-}
-.kpi-val {
-    font-size: 1.85rem;
-    font-weight: 700;
-    line-height: 1.1;
-    color: var(--text);
-    letter-spacing: -0.015em;
-}
-.kpi-val.pos  { color: var(--green); }
-.kpi-val.neg  { color: var(--red);   }
-.kpi-val.info { background: var(--accent-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
-.kpi-sub {
-    font-size: 0.66rem;
-    color: var(--dim);
-    margin-top: 0.35rem;
-    letter-spacing: .02em;
-}
-
-/* Status pills (for LONG/SHORT) */
-.pill-status {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    font-weight: 600;
-    letter-spacing: 0.03em;
-    font-family: var(--font-mono);
-}
-.pill-status.long {
-    background: rgba(0,227,137,.15);
-    color: var(--green);
-    border: 1px solid rgba(0,227,137,.3);
-}
-.pill-status.short {
-    background: rgba(255,84,112,.15);
-    color: var(--red);
-    border: 1px solid rgba(255,84,112,.3);
-}
-.pill-status.watch {
-    background: rgba(255,200,87,.15);
-    color: var(--yellow);
-    border: 1px solid rgba(255,200,87,.3);
-}
-
-/* Rank pills (numbered) */
-.pill-rank {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 28px;
-    height: 28px;
-    padding: 0 6px;
-    border-radius: 6px;
-    background: linear-gradient(135deg, rgba(56,208,255,.15), rgba(0,227,137,.08));
-    border: 1px solid var(--border2);
-    font-weight: 700;
-    font-size: 0.75rem;
-    color: var(--cyan);
-    font-family: var(--font-mono);
-}
-
-/* Section headers */
-.sec-hdr {
-    font-size: 0.64rem;
-    font-weight: 700;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.18em;
-    padding-bottom: 8px;
-    margin: 1.6rem 0 0.9rem;
-    position: relative;
-    display: flex;
-    align-items: center;
-    gap: .5rem;
-}
-.sec-hdr::after {
-    content: '';
-    position: absolute;
-    left: 0; right: 0; bottom: 0;
-    height: 1px;
-    background: linear-gradient(90deg, var(--border2) 0%, var(--border) 30%, transparent 100%);
-}
-
-/* Status dot */
-.dot {
-    display: inline-block;
-    width: 6px; height: 6px;
-    border-radius: 50%;
-    background: var(--green);
-    box-shadow: 0 0 8px var(--green), 0 0 2px var(--green);
-    margin-right: 6px;
-    animation: pulse 2s ease-in-out infinite;
-}
-@keyframes pulse {
-    0%,100% { opacity: 1; transform: scale(1); }
-    50%     { opacity: .55; transform: scale(.85); }
-}
-
-/* Streamlit overrides */
-div[data-testid="stMetric"]      { background: var(--card); border: 1px solid var(--border);
-                                    border-radius: 10px; padding: .9rem 1.1rem; }
-div[data-testid="stExpander"]    { border: 1px solid var(--border); border-radius: 10px;
-                                   background: var(--card) !important; }
-div[data-testid="stExpander"] summary { color: var(--text) !important; font-weight: 500;
-                                         padding: .6rem .9rem !important; }
-div[data-testid="stExpander"] summary:hover { color: var(--cyan) !important; }
-/* Restyle expander arrow — Streamlit uses a filled triangle */
-div[data-testid="stExpander"] summary svg {
-    color: var(--cyan) !important;
-    fill: var(--cyan) !important;
-}
-div[data-testid="stExpander"] summary svg path { fill: var(--cyan) !important; }
-
-/* ── Dataframe / Table — full dark theme ── */
-div[data-testid="stDataFrame"]   { border: 1px solid var(--border); border-radius: 6px;
-                                   overflow: hidden; }
-/* Glide data grid (Streamlit's table renderer) */
-div[data-testid="stDataFrame"] [data-testid="glideDataEditor"],
-div[data-testid="stDataFrame"] canvas { background: var(--card) !important; }
-.stDataFrame thead tr th         { background: var(--card2) !important; font-size: .72rem !important;
-                                   text-transform: uppercase; letter-spacing: .05em;
-                                   color: var(--muted) !important; }
-.stDataFrame tbody tr td         { background: var(--card) !important;
-                                   color: var(--text) !important;
-                                   border-color: var(--border) !important; }
-.stDataFrame tbody tr:nth-child(even) td { background: var(--card2) !important; }
-/* Arrow table fallback */
-div[data-testid="stTable"] table { background: var(--card) !important;
-                                   color: var(--text) !important; }
-div[data-testid="stTable"] th    { background: var(--card2) !important;
-                                   color: var(--muted) !important;
-                                   border-color: var(--border) !important; }
-div[data-testid="stTable"] td    { background: var(--card) !important;
-                                   color: var(--text) !important;
-                                   border-color: var(--border) !important; }
-/* Pandas styler / st.dataframe inner iframe */
-.stDataFrame iframe              { background: var(--card) !important; }
-/* Generic table elements inside markdown */
-.stApp table                     { background: var(--card) !important; color: var(--text) !important; }
-.stApp table th                  { background: var(--card2) !important; color: var(--muted) !important;
-                                   border-color: var(--border) !important; }
-.stApp table td                  { border-color: var(--border) !important; }
-
-/* Scrollbar */
-::-webkit-scrollbar              { width: 5px; height: 5px; }
-::-webkit-scrollbar-track        { background: var(--bg); }
-::-webkit-scrollbar-thumb        { background: var(--border); border-radius: 3px; }
-
-/* ── Top toolbar / header bar ── */
-header[data-testid="stHeader"]   { background: transparent !important;
-                                   border-bottom: 1px solid var(--border) !important;
-                                   height: auto !important; }
-div[data-testid="stToolbar"]     { background: transparent !important; }
-div[data-testid="stDecoration"]  { background: transparent !important; display: none !important; }
-div[data-testid="stStatusWidget"]{ background: var(--card) !important;
-                                   color: var(--text) !important; }
-/* Hide only the Deploy button — keep the toolbar / menu intact */
-div[data-testid="stDeployButton"] { display: none !important; }
-
-/* ── Sidebar Radio buttons — styled as nav items ── */
-section[data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] {
-    gap: 1px !important;
-}
-section[data-testid="stSidebar"] div[data-testid="stRadio"] label {
-    font-size: 0.84rem !important;
-    color: var(--muted) !important;
-    padding: 0.55rem 0.85rem !important;
-    border-radius: 8px;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    border-left: 2px solid transparent;
-    font-weight: 500 !important;
-    letter-spacing: .01em;
-}
-section[data-testid="stSidebar"] div[data-testid="stRadio"] label:hover {
-    color: var(--text) !important;
-    background: rgba(255,255,255,.02) !important;
-}
-section[data-testid="stSidebar"] div[data-testid="stRadio"] label[data-checked="true"],
-section[data-testid="stSidebar"] div[data-testid="stRadio"] label[aria-checked="true"] {
-    color: #ffffff !important;
-    background: linear-gradient(90deg, rgba(56,208,255,.10), rgba(0,227,137,.04)) !important;
-    font-weight: 600;
-    border-left: 2px solid var(--cyan);
-}
-section[data-testid="stSidebar"] div[data-testid="stRadio"] label p {
-    color: inherit !important;
-    margin: 0 !important;
-    display: flex;
-    align-items: center;
-}
-/* Hide only the radio circle indicator */
-section[data-testid="stSidebar"] div[data-testid="stRadio"] label > div[data-testid="stThumbValue"],
-section[data-testid="stSidebar"] div[data-testid="stRadio"] [role="radio"]::before,
-section[data-testid="stSidebar"] [data-baseweb="radio"] > div > div:first-child > div:first-child {
-    display: none !important;
-}
-section[data-testid="stSidebar"] [data-baseweb="radio"] > div {
-    border: none !important; background: transparent !important;
-}
-section[data-testid="stSidebar"] [data-baseweb="radio"] label { color: inherit !important; }
-
-/* ── Buttons ── */
-.stButton button, .stDownloadButton button {
-    background: var(--card2) !important;
-    border: 1px solid var(--border) !important;
-    color: var(--text) !important;
-    border-radius: 8px; font-size: 0.82rem;
-    font-weight: 500;
-    letter-spacing: .01em;
-    transition: all 0.18s ease;
-    padding: .5rem .9rem !important;
-}
-.stButton button:hover, .stDownloadButton button:hover {
-    border-color: var(--cyan) !important;
-    background: linear-gradient(180deg, var(--card2), var(--card)) !important;
-    color: #ffffff !important;
-    box-shadow: 0 0 0 1px rgba(56,208,255,.2), 0 4px 12px rgba(0,0,0,.3);
-}
-.stButton button:active {
-    transform: translateY(1px);
-    background: var(--border) !important;
-}
-
-/* ── Select boxes / dropdowns ──
-   Streamlit/baseweb chevrons are FILLED paths, so we color them via `fill`
-   (not stroke). Any stroke override here makes the chevron disappear. */
-div[data-baseweb="select"] > div { background: var(--card) !important;
-                                   border-color: var(--border) !important;
-                                   color: var(--text) !important; }
-div[data-baseweb="select"] span  { color: var(--text) !important; }
-div[data-baseweb="select"] svg   { fill: var(--cyan) !important; color: var(--cyan) !important; }
-div[data-baseweb="select"] svg path { fill: var(--cyan) !important; }
-[data-baseweb="popover"] ul      { background: var(--card) !important;
-                                   border: 1px solid var(--border) !important; }
-[data-baseweb="popover"] li      { color: var(--text) !important; }
-[data-baseweb="popover"] li:hover{ background: var(--card2) !important; }
-
-/* ── Multiselect / tags ── */
-[data-baseweb="tag"]             { background: var(--card2) !important;
-                                   border-color: var(--border) !important;
-                                   color: var(--text) !important; }
-[data-baseweb="tag"] svg         { fill: var(--muted) !important; color: var(--muted) !important; }
-[data-baseweb="tag"] svg path    { fill: var(--muted) !important; }
-[data-baseweb="tag"]:hover svg   { fill: var(--text) !important; color: var(--text) !important; }
-[data-baseweb="tag"]:hover svg path { fill: var(--text) !important; }
-
-/* ── Date input ── */
-div[data-baseweb="input"] svg    { fill: var(--cyan) !important; color: var(--cyan) !important; }
-
-/* ── Checkbox ── */
-div[data-testid="stCheckbox"] label span { color: var(--text) !important; }
-
-/* ── Dividers ── */
-hr                               { border-color: var(--border) !important; }
-
-/* ── Tab bar ── */
-button[data-baseweb="tab"]       { color: var(--muted) !important;
-                                   background: transparent !important; }
-button[data-baseweb="tab"][aria-selected="true"] {
-    color: var(--cyan) !important;
-    border-bottom-color: var(--cyan) !important;
-}
-
-/* ── Plotly modebar (chart toolbar) ── */
-.modebar                         { background: transparent !important; }
-.modebar-btn path                { fill: var(--muted) !important; }
-.modebar-btn:hover path          { fill: var(--cyan) !important; }
-
-/* ── All remaining text elements ── */
-.stApp p, .stApp span, .stApp div, .stApp label {
-    color: var(--text); }
-.stApp .stMarkdown p             { color: var(--text); }
-
-/* ── Spinner ── */
-div[data-testid="stSpinner"] span { color: var(--muted) !important; }
-</style>
-""", unsafe_allow_html=True)
-
-# ─── Refresh layer: modern SPA polish ─────────────────────────────────────────
-st.markdown("""
-<style>
-/* ────────────────────────────────────────────────────────────────────────
-   REFRESH LAYER — overrides for a cohesive, modern SPA feel.
-   Loaded after the base stylesheet so these rules win on conflict.
-   ──────────────────────────────────────────────────────────────────────── */
-
-:root {
-    --r-radius:        10px;
-    --r-radius-sm:     8px;
-    --r-radius-lg:     14px;
-    --r-pad:           .65rem .9rem;
-    --r-control-h:     38px;
-    --r-shadow:        0 1px 0 rgba(255,255,255,.02) inset, 0 1px 2px rgba(0,0,0,.35);
-    --r-shadow-soft:   0 4px 18px -8px rgba(0,0,0,.55);
-    --r-glow-cyan:     0 0 0 1px rgba(56,208,255,.45), 0 4px 24px -6px rgba(56,208,255,.35);
-    --r-fade-dur:      .28s;
-    --r-ease:          cubic-bezier(.22,.61,.36,1);
-}
-
-/* ── Page fade-in transition (every rerun feels seamless) ──────────────── */
-section[data-testid="stMain"] > div:first-child,
-section.main > div:first-child,
-[data-testid="stAppViewContainer"] section.main > div:first-child {
-    animation: rFadeIn var(--r-fade-dur) var(--r-ease) both;
-}
-@keyframes rFadeIn {
-    from { opacity: 0; transform: translateY(4px); }
-    to   { opacity: 1; transform: translateY(0); }
-}
-
-/* ── Strip every Streamlit radio circle/dot system-wide ────────────────── */
-[data-baseweb="radio"] > div:first-child,
-[data-baseweb="radio"] [role="radio"],
-[data-baseweb="radio"] input[type="radio"] {
-    display: none !important;
-    width: 0 !important;
-    height: 0 !important;
-}
-[data-baseweb="radio"] {
-    margin: 0 !important;
-    padding: 0 !important;
-}
-
-/* ── Sidebar nav buttons → SPA pills ───────────────────────────────────── */
-[data-testid="stSidebar"] .nav-shell { margin: .15rem 0 .25rem; }
-
-[data-testid="stSidebar"] [data-testid="stButton"] { margin: 0 !important; }
-[data-testid="stSidebar"] [data-testid="stButton"] > button,
-[data-testid="stSidebar"] [data-testid="baseButton-primary"],
-[data-testid="stSidebar"] [data-testid="baseButton-secondary"] {
-    width: 100% !important;
-    height: 40px !important;
-    padding: 0 .85rem !important;
-    margin: 2px 0 !important;
-    border-radius: var(--r-radius) !important;
-    background: transparent !important;
-    border: 1px solid transparent !important;
-    color: var(--muted) !important;
-    font-family: var(--font-sans) !important;
-    font-weight: 500 !important;
-    font-size: .835rem !important;
-    letter-spacing: .005em !important;
-    text-align: left !important;
-    justify-content: flex-start !important;
-    box-shadow: none !important;
-    transition: background .18s var(--r-ease),
-                color .18s var(--r-ease),
-                border-color .18s var(--r-ease),
-                transform .18s var(--r-ease) !important;
-    position: relative !important;
-}
-[data-testid="stSidebar"] [data-testid="stButton"] > button p,
-[data-testid="stSidebar"] [data-testid="stButton"] > button div {
-    color: inherit !important;
-    font-weight: inherit !important;
-    text-align: left !important;
-    width: 100% !important;
-}
-[data-testid="stSidebar"] [data-testid="stButton"] > button:hover {
-    background: rgba(255,255,255,.025) !important;
-    color: var(--text) !important;
-    border-color: var(--border) !important;
-    transform: translateX(1px) !important;
-}
-/* Active nav (rendered as type="primary") */
-[data-testid="stSidebar"] button[kind="primary"],
-[data-testid="stSidebar"] [data-testid="baseButton-primary"] {
-    background: linear-gradient(135deg, rgba(56,208,255,.14), rgba(0,227,137,.07)) !important;
-    color: var(--text) !important;
-    border-color: rgba(56,208,255,.35) !important;
-    box-shadow: 0 0 0 1px rgba(56,208,255,.18) inset,
-                0 4px 18px -10px rgba(56,208,255,.6) !important;
-}
-[data-testid="stSidebar"] button[kind="primary"]:hover {
-    background: linear-gradient(135deg, rgba(56,208,255,.18), rgba(0,227,137,.1)) !important;
-    transform: none !important;
-}
-[data-testid="stSidebar"] button[kind="primary"]::before {
-    content: "";
-    position: absolute;
-    left: 0; top: 22%; bottom: 22%;
-    width: 3px;
-    border-radius: 0 3px 3px 0;
-    background: var(--accent-grad);
-    box-shadow: 0 0 8px rgba(56,208,255,.6);
-}
-
-/* Refresh-data button (last button in sidebar) keeps subtle accent look */
-[data-testid="stSidebar"] button[key="refresh-now"],
-[data-testid="stSidebar"] [data-testid="stButton"]:last-of-type > button {
-    height: 36px !important;
-    background: linear-gradient(180deg, rgba(56,208,255,.05), rgba(0,227,137,.02)) !important;
-    border: 1px solid var(--border2) !important;
-    color: var(--text) !important;
-    justify-content: center !important;
-    font-size: .78rem !important;
-    letter-spacing: .04em !important;
-    text-transform: uppercase !important;
-}
-
-/* ── Main-area buttons (not nav) — modern, tight, accessible ───────────── */
-section[data-testid="stMain"] [data-testid="stButton"] > button,
-section.main [data-testid="stButton"] > button {
-    height: var(--r-control-h);
-    border-radius: var(--r-radius-sm);
-    background: var(--card2);
-    border: 1px solid var(--border2);
-    color: var(--text);
-    font-family: var(--font-sans);
-    font-weight: 500;
-    font-size: .82rem;
-    padding: 0 1rem;
-    transition: all .18s var(--r-ease);
-    box-shadow: var(--r-shadow);
-}
-section[data-testid="stMain"] [data-testid="stButton"] > button:hover {
-    border-color: rgba(56,208,255,.5);
-    background: #1a2230;
-    transform: translateY(-1px);
-    box-shadow: var(--r-shadow-soft);
-}
-section[data-testid="stMain"] button[kind="primary"] {
-    background: var(--accent-grad) !important;
-    color: #061018 !important;
-    border-color: transparent !important;
-    font-weight: 600 !important;
-}
-
-/* ── Form inputs — unified height, focus rings ─────────────────────────── */
-[data-baseweb="select"] > div,
-[data-baseweb="input"] > div,
-[data-testid="stTextInput"] input,
-[data-testid="stNumberInput"] input,
-[data-testid="stDateInput"] input {
-    min-height: var(--r-control-h) !important;
-    border-radius: var(--r-radius-sm) !important;
-    background: var(--card) !important;
-    border: 1px solid var(--border) !important;
-    transition: border-color .15s var(--r-ease), box-shadow .15s var(--r-ease) !important;
-    font-family: var(--font-sans) !important;
-}
-[data-baseweb="select"] > div:hover,
-[data-baseweb="input"] > div:hover { border-color: var(--border2) !important; }
-
-[data-baseweb="select"] > div:focus-within,
-[data-baseweb="input"] > div:focus-within,
-[data-testid="stTextInput"] input:focus,
-[data-testid="stNumberInput"] input:focus {
-    border-color: rgba(56,208,255,.55) !important;
-    box-shadow: 0 0 0 3px rgba(56,208,255,.12) !important;
-    outline: none !important;
-}
-
-/* Multiselect tags */
-[data-baseweb="tag"] {
-    background: rgba(56,208,255,.10) !important;
-    border: 1px solid rgba(56,208,255,.25) !important;
-    color: var(--cyan) !important;
-    border-radius: 6px !important;
-    font-weight: 500 !important;
-    font-size: .72rem !important;
-    letter-spacing: .02em !important;
-}
-
-/* Dropdown chevrons (filled SVG paths) */
-[data-baseweb="select"] svg,
-[data-baseweb="select"] svg path {
-    fill: var(--muted) !important;
-    transition: fill .15s var(--r-ease), transform .15s var(--r-ease);
-}
-[data-baseweb="select"]:hover svg,
-[data-baseweb="select"]:hover svg path { fill: var(--cyan) !important; }
-
-/* Listbox / dropdown menu */
-[data-baseweb="popover"] [role="listbox"],
-[data-baseweb="menu"] {
-    background: var(--card2) !important;
-    border: 1px solid var(--border2) !important;
-    border-radius: var(--r-radius) !important;
-    box-shadow: 0 12px 40px -12px rgba(0,0,0,.6) !important;
-    overflow: hidden !important;
-}
-[data-baseweb="popover"] li:hover,
-[data-baseweb="menu"] li:hover {
-    background: rgba(56,208,255,.08) !important;
-    color: var(--text) !important;
-}
-
-/* ── Expanders — clean, no AI-vibes, no ligature leakage ───────────────── */
-[data-testid="stExpander"] {
-    border: 1px solid var(--border) !important;
-    border-radius: var(--r-radius) !important;
-    background: var(--card) !important;
-    overflow: hidden !important;
-    transition: border-color .15s var(--r-ease), box-shadow .15s var(--r-ease) !important;
-}
-[data-testid="stExpander"]:hover {
-    border-color: rgba(56,208,255,.35) !important;
-    box-shadow: 0 4px 18px -12px rgba(56,208,255,.35) !important;
-}
-[data-testid="stExpander"] summary,
-[data-testid="stExpander"] details > summary,
-[data-testid="stExpander"] [data-testid="stExpanderToggleIcon"] ~ *,
-[data-testid="stExpander"] button[kind="headerNoPadding"] {
-    padding: .8rem 1.1rem !important;
-    font-weight: 500 !important;
-    font-size: .85rem !important;
-    color: var(--text) !important;
-    cursor: pointer !important;
-    transition: color .15s var(--r-ease), background .15s var(--r-ease) !important;
-    display: flex !important;
-    align-items: center !important;
-    gap: .6rem !important;
-}
-[data-testid="stExpander"] summary:hover,
-[data-testid="stExpander"] summary:hover *,
-[data-testid="stExpander"] button[kind="headerNoPadding"]:hover,
-[data-testid="stExpander"] button[kind="headerNoPadding"]:hover * {
-    color: var(--cyan) !important;
-    background: rgba(56,208,255,.04) !important;
-}
-
-/* Nuke any Material Symbols ligature text inside the expander header
-   (the "keyboard_arrow_right" / "arrow_right" etc. glyph fallbacks). */
-[data-testid="stExpander"] summary [class*="material"],
-[data-testid="stExpander"] summary [class*="Material"],
-[data-testid="stExpander"] summary [class*="icon"] span,
-[data-testid="stExpander"] summary span[aria-label],
-[data-testid="stExpander"] [data-testid="stExpanderToggleIcon"],
-[data-testid="stExpanderToggleIcon"],
-[data-testid="stExpander"] summary svg + span,
-[data-testid="stExpander"] button[kind="headerNoPadding"] [class*="material"],
-[data-testid="stExpander"] button[kind="headerNoPadding"] [class*="Material"] {
-    font-size: 0 !important;
-    line-height: 0 !important;
-    width: 0 !important;
-    height: 0 !important;
-    color: transparent !important;
-    overflow: hidden !important;
-    display: inline-block !important;
-}
-
-/* Our own chevron (CSS-only, no font needed) as the LAST child of summary */
-[data-testid="stExpander"] summary::after,
-[data-testid="stExpander"] details > summary::after {
-    content: "";
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-right: 1.6px solid var(--muted);
-    border-bottom: 1.6px solid var(--muted);
-    transform: rotate(45deg) translate(-2px, -2px);
-    margin-left: auto;
-    transition: transform .22s var(--r-ease), border-color .15s var(--r-ease);
-    flex-shrink: 0;
-}
-[data-testid="stExpander"] details[open] > summary::after {
-    transform: rotate(225deg) translate(-2px, -2px);
-}
-[data-testid="stExpander"] summary:hover::after,
-[data-testid="stExpander"] details > summary:hover::after {
-    border-color: var(--cyan) !important;
-}
-
-/* Streamlit's own SVG chevron (if present) — recolor + hide ligature text */
-[data-testid="stExpander"] svg { fill: var(--muted) !important; transition: fill .15s var(--r-ease); }
-[data-testid="stExpander"] summary:hover svg { fill: var(--cyan) !important; }
-
-/* ── Tables / dataframes — sharper, mono numerals ──────────────────────── */
-[data-testid="stDataFrame"] {
-    border: 1px solid var(--border) !important;
-    border-radius: var(--r-radius) !important;
-    overflow: hidden !important;
-    background: var(--card) !important;
-}
-[data-testid="stDataFrame"] [role="columnheader"] {
-    background: var(--card2) !important;
-    color: var(--muted) !important;
-    font-weight: 600 !important;
-    font-size: .7rem !important;
-    letter-spacing: .06em !important;
-    text-transform: uppercase !important;
-    border-bottom: 1px solid var(--border2) !important;
-}
-[data-testid="stDataFrame"] [role="row"]:hover [role="gridcell"] {
-    background: rgba(56,208,255,.04) !important;
-}
-[data-testid="stDataFrame"] [role="gridcell"] {
-    font-family: var(--font-mono) !important;
-    font-size: .78rem !important;
-}
-
-/* ── Tabs ──────────────────────────────────────────────────────────────── */
-[data-baseweb="tab-list"] {
-    border-bottom: 1px solid var(--border) !important;
-    gap: .25rem !important;
-}
-[data-baseweb="tab"] {
-    background: transparent !important;
-    color: var(--muted) !important;
-    border: none !important;
-    border-radius: 0 !important;
-    padding: .6rem 1rem !important;
-    font-weight: 500 !important;
-    font-size: .82rem !important;
-    transition: color .15s var(--r-ease) !important;
-}
-[data-baseweb="tab"]:hover { color: var(--text) !important; }
-[data-baseweb="tab"][aria-selected="true"] {
-    color: var(--cyan) !important;
-    border-bottom: 2px solid var(--cyan) !important;
-}
-[data-baseweb="tab-highlight"] { background: var(--accent-grad) !important; height: 2px !important; }
-
-/* ── Metric cards (KPIs) — softer, lifted ──────────────────────────────── */
-[data-testid="stMetric"] {
-    background: var(--card) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: var(--r-radius-lg) !important;
-    padding: 1rem 1.1rem !important;
-    transition: border-color .15s var(--r-ease), transform .15s var(--r-ease) !important;
-}
-[data-testid="stMetric"]:hover {
-    border-color: var(--border2) !important;
-    transform: translateY(-1px);
-}
-[data-testid="stMetricLabel"] {
-    color: var(--muted) !important;
-    font-size: .68rem !important;
-    font-weight: 600 !important;
-    letter-spacing: .08em !important;
-    text-transform: uppercase !important;
-}
-[data-testid="stMetricValue"] {
-    font-family: var(--font-mono) !important;
-    font-weight: 600 !important;
-    font-size: 1.5rem !important;
-    color: var(--text) !important;
-}
-
-/* ── Sliders ──────────────────────────────────────────────────────────── */
-[data-baseweb="slider"] [role="slider"] {
-    background: var(--cyan) !important;
-    box-shadow: 0 0 0 4px rgba(56,208,255,.15) !important;
-}
-
-/* ── Scrollbars — hidden, scrolling still works ───────────────────────── */
+/* Kill scrollbars but keep scroll */
 html, body, *, *::before, *::after {
-    scrollbar-width: none !important;        /* Firefox */
-    -ms-overflow-style: none !important;     /* IE/Edge */
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
 }
-::-webkit-scrollbar,
-*::-webkit-scrollbar {
-    width: 0 !important;
-    height: 0 !important;
-    display: none !important;
-    background: transparent !important;
-}
-::-webkit-scrollbar-track,
-::-webkit-scrollbar-thumb,
-::-webkit-scrollbar-corner { display: none !important; background: transparent !important; }
+::-webkit-scrollbar, *::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
 
-/* ── Code blocks ──────────────────────────────────────────────────────── */
-code, pre code {
-    font-family: var(--font-mono) !important;
-    background: var(--card2) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 6px !important;
-    padding: .12rem .35rem !important;
-    font-size: .78rem !important;
-}
-pre {
-    background: var(--card) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: var(--r-radius) !important;
-}
-
-/* ── Sidebar polish ───────────────────────────────────────────────────── */
-[data-testid="stSidebar"] {
-    border-right: 1px solid var(--border) !important;
-    background: linear-gradient(180deg, #0a0f17 0%, #07090f 100%) !important;
-}
-[data-testid="stSidebar"] > div { padding-top: .5rem !important; }
-
-/* ── Hide Streamlit chrome that screams "AI demo" ──────────────────────── */
+/* ── Hide Streamlit chrome ────────────────────────────────────────────────── */
+header[data-testid="stHeader"] { background: transparent !important; height: 0 !important; }
 [data-testid="stDeployButton"],
 [data-testid="stStatusWidget"],
-header [data-testid="stHeaderActionElements"] { display: none !important; }
-header[data-testid="stHeader"] {
-    background: transparent !important;
-    height: 0 !important;
-}
-
-/* ── Kill the sidebar collapse/expand chevron buttons entirely ─────────
-   Streamlit renders these as Material Symbols ligatures
-   (e.g. "keyboard_double_arrow_left"). When the font fails to load
-   the raw ligature text leaks through, so we just remove the button. */
+header [data-testid="stHeaderActionElements"],
 [data-testid="stSidebarCollapseButton"],
 [data-testid="stSidebarCollapsedControl"],
 [data-testid="collapsedControl"],
 button[title="Close sidebar"],
 button[title="Open sidebar"],
-[data-testid="stSidebar"] [data-testid="stBaseButton-headerNoPadding"] {
-    display: none !important;
-    visibility: hidden !important;
-    width: 0 !important;
-    height: 0 !important;
-    overflow: hidden !important;
-}
+#MainMenu, footer { display: none !important; }
 
-/* Nuke any orphan Material Symbols ligature text that leaks through
-   (belt-and-braces in case Streamlit changes the DOM). */
-.material-symbols-rounded,
-.material-symbols-outlined,
-.material-symbols-sharp,
-.material-icons,
-span[class*="material-symbols"],
-span[class*="material-icons"] {
-    font-family: 'Material Symbols Rounded',
-                 'Material Symbols Outlined',
-                 'Material Icons' !important;
-    font-size: 0 !important;
-    line-height: 0 !important;
-    color: transparent !important;
-}
+/* Nuke any Material Symbols ligature leak */
+[class*="material-symbols"], [class*="material-icons"],
+span[class*="Symbol"] { font-size: 0 !important; color: transparent !important; line-height: 0 !important; }
 
-/* ── Tighter top padding so content breathes ──────────────────────────── */
+/* ── Layout ───────────────────────────────────────────────────────────────── */
 section[data-testid="stMain"] .block-container,
 section.main .block-container {
-    padding-top: 1.6rem !important;
-    padding-bottom: 3rem !important;
-    max-width: 1440px !important;
+    padding-top: 2.25rem !important;
+    padding-bottom: 4rem !important;
+    max-width: 1400px !important;
 }
 
-/* ── Tooltip / popovers ───────────────────────────────────────────────── */
-[data-baseweb="tooltip"] {
-    background: var(--card2) !important;
-    border: 1px solid var(--border2) !important;
-    border-radius: 6px !important;
+/* Seamless fade on rerun */
+section[data-testid="stMain"] > div:first-child,
+section.main > div:first-child {
+    animation: fadeIn .24s cubic-bezier(.22,.61,.36,1) both;
+}
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(3px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Sidebar ──────────────────────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+    background: #060606 !important;
+    border-right: 1px solid var(--border) !important;
+    width: 240px !important;
+    min-width: 240px !important;
+}
+[data-testid="stSidebar"] > div { padding: 1rem .75rem 0 !important; }
+[data-testid="stSidebarNavLink"] { display: none !important; }
+
+/* Brand block */
+.brand {
+    display: flex; align-items: center; gap: .6rem;
+    padding: .35rem .25rem .85rem;
+}
+.brand-mark {
+    width: 28px; height: 28px; border-radius: 6px;
+    background: var(--text); color: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+}
+.brand-name {
+    font-size: .82rem; font-weight: 600; letter-spacing: -.01em; color: var(--text);
+    line-height: 1.15;
+}
+.brand-sub {
+    font-size: .62rem; color: var(--dim); text-transform: uppercase;
+    letter-spacing: .12em; margin-top: 2px; font-weight: 500;
+}
+
+.divider {
+    height: 1px; background: var(--border); margin: .5rem -.25rem 1rem; border: 0;
+}
+
+/* Nav buttons (primary = active, secondary = inactive) */
+[data-testid="stSidebar"] [data-testid="stButton"] > button {
+    width: 100% !important;
+    height: 34px !important;
+    padding: 0 .7rem !important;
+    margin: 1px 0 !important;
+    border-radius: var(--radius) !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    color: var(--muted) !important;
+    font-family: var(--font-sans) !important;
+    font-weight: 500 !important;
+    font-size: .82rem !important;
+    letter-spacing: -.005em !important;
+    text-align: left !important;
+    justify-content: flex-start !important;
+    box-shadow: none !important;
+    transition: background .15s ease, color .15s ease, border-color .15s ease !important;
+}
+[data-testid="stSidebar"] [data-testid="stButton"] > button:hover {
+    background: var(--card-2) !important;
     color: var(--text) !important;
-    font-size: .72rem !important;
-    box-shadow: 0 8px 24px -8px rgba(0,0,0,.5) !important;
+}
+[data-testid="stSidebar"] [data-testid="stButton"] > button p,
+[data-testid="stSidebar"] [data-testid="stButton"] > button div {
+    color: inherit !important; font-weight: inherit !important;
+    text-align: left !important;
+}
+[data-testid="stSidebar"] button[kind="primary"] {
+    background: var(--card-2) !important;
+    color: var(--text) !important;
+    border: 1px solid var(--border-2) !important;
 }
 
-/* ── Selection ────────────────────────────────────────────────────────── */
-::selection { background: rgba(56,208,255,.30); color: var(--text); }
+/* Refresh button in sidebar */
+[data-testid="stSidebar"] button[key="refresh-now"],
+[data-testid="stSidebar"] div:has(> [data-testid="stButton"]:last-of-type) [data-testid="stButton"]:last-of-type button {
+    height: 32px !important;
+    justify-content: center !important;
+    background: transparent !important;
+    border: 1px solid var(--border) !important;
+    color: var(--muted) !important;
+    font-size: .72rem !important;
+    letter-spacing: .04em !important;
+    text-transform: uppercase !important;
+}
+
+/* Live indicator */
+.live-indicator {
+    display: flex; align-items: center; justify-content: center; gap: .4rem;
+    font-size: .68rem; color: var(--dim); letter-spacing: .06em;
+    padding: .6rem 0 .4rem; font-family: var(--font-mono);
+}
+.live-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--pos); box-shadow: 0 0 0 3px rgba(16,185,129,.18);
+    animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+
+/* ── Page header ──────────────────────────────────────────────────────────── */
+.ph {
+    display: flex; align-items: center; gap: .9rem;
+    padding: 0 0 1.25rem; margin-bottom: 1.5rem;
+    border-bottom: 1px solid var(--border);
+}
+.ph-ico {
+    width: 40px; height: 40px; border-radius: 8px;
+    background: var(--card-2);
+    border: 1px solid var(--border-2);
+    color: var(--text);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+}
+.ph-ico.branded {
+    background: transparent;
+    padding: 3px;
+    border-color: var(--border);
+}
+.ph-ico.branded img { border-radius: 5px; }
+.ph-title {
+    font-size: 1.5rem; font-weight: 600; letter-spacing: -.02em; color: var(--text);
+    line-height: 1.15;
+}
+.ph-sub {
+    font-size: .82rem; color: var(--muted); margin-top: 3px; font-weight: 400;
+    letter-spacing: -.005em;
+}
+
+/* ── KPI cards ────────────────────────────────────────────────────────────── */
+.kpi {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 1rem 1.1rem;
+    transition: border-color .15s ease;
+    height: 100%;
+    display: flex; flex-direction: column; justify-content: space-between;
+    min-height: 98px;
+}
+.kpi:hover { border-color: var(--border-2); }
+.kpi-label {
+    font-size: .7rem; color: var(--muted); font-weight: 500;
+    letter-spacing: .03em; text-transform: uppercase;
+}
+.kpi-val {
+    font-family: var(--font-mono); font-size: 1.65rem; font-weight: 600;
+    color: var(--text); line-height: 1.1; letter-spacing: -.02em;
+    margin-top: .45rem;
+}
+.kpi-val.pos { color: var(--pos); }
+.kpi-val.neg { color: var(--neg); }
+.kpi-val.dim { color: var(--dim); }
+.kpi-sub {
+    font-size: .72rem; color: var(--dim); margin-top: .35rem;
+    font-weight: 400; letter-spacing: -.005em;
+}
+
+/* ── Section heading ──────────────────────────────────────────────────────── */
+.sec {
+    font-size: .72rem; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .07em;
+    margin: 1.5rem 0 .75rem;
+    display: flex; align-items: center; gap: .55rem;
+}
+.sec::after {
+    content: ""; flex: 1; height: 1px; background: var(--border);
+}
+
+/* ── Empty state ──────────────────────────────────────────────────────────── */
+.empty {
+    border: 1px dashed var(--border-2);
+    border-radius: var(--radius-lg);
+    padding: 2rem 1.25rem;
+    text-align: center;
+    background: var(--card);
+    color: var(--muted);
+    font-size: .85rem;
+}
+.empty-title {
+    font-size: .95rem; font-weight: 500; color: var(--text-2); margin-bottom: .35rem;
+}
+
+/* ── Streamlit native empty-state info/warning boxes ──────────────────────── */
+[data-testid="stAlert"] {
+    background: var(--card) !important;
+    border: 1px solid var(--border-2) !important;
+    border-radius: var(--radius-lg) !important;
+    color: var(--text-2) !important;
+}
+[data-testid="stAlert"] svg { color: var(--muted) !important; }
+
+/* ── Buttons (main area) ──────────────────────────────────────────────────── */
+section[data-testid="stMain"] [data-testid="stButton"] > button {
+    height: 34px;
+    padding: 0 .9rem;
+    border-radius: var(--radius);
+    background: var(--card-2);
+    border: 1px solid var(--border-2);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-weight: 500;
+    font-size: .82rem;
+    letter-spacing: -.005em;
+    transition: background .12s ease, border-color .12s ease, transform .12s ease;
+    box-shadow: none;
+}
+section[data-testid="stMain"] [data-testid="stButton"] > button:hover {
+    background: var(--elevated);
+    border-color: var(--border-3);
+}
+section[data-testid="stMain"] button[kind="primary"] {
+    background: var(--text) !important;
+    color: var(--bg) !important;
+    border-color: var(--text) !important;
+    font-weight: 600 !important;
+}
+
+/* ── Download button ──────────────────────────────────────────────────────── */
+[data-testid="stDownloadButton"] button {
+    height: 34px;
+    padding: 0 .9rem;
+    border-radius: var(--radius);
+    background: var(--text) !important;
+    color: var(--bg) !important;
+    border: 1px solid var(--text) !important;
+    font-weight: 600 !important;
+    font-size: .82rem !important;
+}
+[data-testid="stDownloadButton"] button:hover { background: var(--text-2) !important; }
+
+/* ── Inputs (select, text, number, date) ──────────────────────────────────── */
+[data-baseweb="select"] > div,
+[data-baseweb="input"] > div,
+[data-testid="stTextInput"] input,
+[data-testid="stNumberInput"] input,
+[data-testid="stDateInput"] input {
+    min-height: 34px !important;
+    border-radius: var(--radius) !important;
+    background: var(--card) !important;
+    border: 1px solid var(--border-2) !important;
+    color: var(--text) !important;
+    font-family: var(--font-sans) !important;
+    font-size: .82rem !important;
+    transition: border-color .12s ease, box-shadow .12s ease !important;
+    box-shadow: none !important;
+}
+[data-baseweb="select"] > div:hover,
+[data-baseweb="input"] > div:hover { border-color: var(--border-3) !important; }
+[data-baseweb="select"] > div:focus-within,
+[data-baseweb="input"] > div:focus-within,
+[data-testid="stTextInput"] input:focus,
+[data-testid="stNumberInput"] input:focus,
+[data-testid="stDateInput"] input:focus {
+    border-color: var(--border-3) !important;
+    box-shadow: 0 0 0 3px rgba(255,255,255,.04) !important;
+    outline: none !important;
+}
+
+/* Input labels */
+[data-testid="stWidgetLabel"] p,
+label p {
+    color: var(--muted) !important;
+    font-size: .72rem !important;
+    font-weight: 500 !important;
+    letter-spacing: .02em !important;
+    text-transform: uppercase !important;
+    margin-bottom: .35rem !important;
+}
+
+/* Multiselect chips */
+[data-baseweb="tag"] {
+    background: var(--elevated) !important;
+    border: 1px solid var(--border-2) !important;
+    color: var(--text) !important;
+    border-radius: var(--radius-sm) !important;
+    font-size: .72rem !important;
+    font-weight: 500 !important;
+}
+
+/* Dropdown chevrons */
+[data-baseweb="select"] svg,
+[data-baseweb="select"] svg path { fill: var(--muted) !important; transition: fill .15s ease; }
+[data-baseweb="select"]:hover svg, [data-baseweb="select"]:hover svg path { fill: var(--text) !important; }
+
+/* Popover menus */
+[data-baseweb="popover"] [role="listbox"],
+[data-baseweb="menu"] {
+    background: var(--elevated) !important;
+    border: 1px solid var(--border-2) !important;
+    border-radius: var(--radius) !important;
+    box-shadow: 0 16px 36px -12px rgba(0,0,0,.6) !important;
+    overflow: hidden !important;
+}
+[data-baseweb="popover"] li:hover, [data-baseweb="menu"] li:hover {
+    background: var(--card-2) !important;
+    color: var(--text) !important;
+}
+
+/* ── Radio (inline, used for outcome filter) ──────────────────────────────── */
+[data-baseweb="radio"] > div:first-child,
+[data-baseweb="radio"] [role="radio"],
+[data-baseweb="radio"] input[type="radio"] {
+    display: none !important; width: 0 !important; height: 0 !important;
+}
+[data-baseweb="radio"] {
+    margin: 0 6px 0 0 !important;
+    padding: 5px 12px !important;
+    border-radius: var(--radius) !important;
+    border: 1px solid var(--border-2) !important;
+    background: var(--card) !important;
+    transition: all .12s ease !important;
+    cursor: pointer !important;
+}
+[data-baseweb="radio"]:hover {
+    background: var(--card-2) !important;
+    border-color: var(--border-3) !important;
+}
+[data-baseweb="radio"] label, [data-baseweb="radio"] span {
+    font-size: .78rem !important;
+    color: var(--muted) !important;
+    cursor: pointer !important;
+}
+[data-baseweb="radio"][aria-checked="true"],
+label[data-baseweb="radio"]:has(input:checked) {
+    background: var(--text) !important;
+    border-color: var(--text) !important;
+}
+[data-baseweb="radio"][aria-checked="true"] label,
+[data-baseweb="radio"][aria-checked="true"] span,
+label[data-baseweb="radio"]:has(input:checked) span {
+    color: var(--bg) !important;
+    font-weight: 600 !important;
+}
+
+/* ── Expanders ────────────────────────────────────────────────────────────── */
+[data-testid="stExpander"] {
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-lg) !important;
+    background: var(--card) !important;
+    overflow: hidden !important;
+    transition: border-color .15s ease !important;
+    margin-bottom: .6rem;
+}
+[data-testid="stExpander"]:hover { border-color: var(--border-2) !important; }
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] details > summary,
+[data-testid="stExpander"] button[kind="headerNoPadding"] {
+    padding: .7rem 1rem !important;
+    font-weight: 500 !important;
+    font-size: .85rem !important;
+    color: var(--text) !important;
+    cursor: pointer !important;
+    transition: color .12s ease !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: .55rem !important;
+}
+[data-testid="stExpander"] summary:hover,
+[data-testid="stExpander"] button[kind="headerNoPadding"]:hover {
+    color: var(--text) !important;
+    background: var(--card-2) !important;
+}
+/* Hide any ligature text that leaks */
+[data-testid="stExpander"] summary [class*="material"],
+[data-testid="stExpander"] summary [class*="Material"],
+[data-testid="stExpander"] [data-testid="stExpanderToggleIcon"],
+[data-testid="stExpanderToggleIcon"],
+[data-testid="stExpander"] button[kind="headerNoPadding"] [class*="material"] {
+    font-size: 0 !important; line-height: 0 !important; color: transparent !important;
+    width: 0 !important; height: 0 !important; overflow: hidden !important;
+}
+/* CSS-only chevron */
+[data-testid="stExpander"] summary::after,
+[data-testid="stExpander"] details > summary::after {
+    content: "";
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-right: 1.5px solid var(--muted);
+    border-bottom: 1.5px solid var(--muted);
+    transform: rotate(-45deg);
+    margin-left: auto;
+    transition: transform .2s ease, border-color .15s ease;
+    flex-shrink: 0;
+}
+[data-testid="stExpander"] details[open] > summary::after {
+    transform: rotate(45deg);
+}
+[data-testid="stExpander"] summary:hover::after { border-color: var(--text) !important; }
+
+/* ── Tables / dataframes ──────────────────────────────────────────────────── */
+[data-testid="stDataFrame"] {
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-lg) !important;
+    overflow: hidden !important;
+    background: var(--card) !important;
+}
+[data-testid="stDataFrame"] [role="columnheader"] {
+    background: #0b0b0b !important;
+    color: var(--muted) !important;
+    font-family: var(--font-sans) !important;
+    font-weight: 600 !important;
+    font-size: .68rem !important;
+    letter-spacing: .06em !important;
+    text-transform: uppercase !important;
+    border-bottom: 1px solid var(--border) !important;
+}
+[data-testid="stDataFrame"] [role="gridcell"] {
+    font-family: var(--font-mono) !important;
+    font-size: .76rem !important;
+    color: var(--text-2) !important;
+}
+[data-testid="stDataFrame"] [role="row"]:hover [role="gridcell"] {
+    background: rgba(255,255,255,.015) !important;
+}
+
+/* ── Tabs ─────────────────────────────────────────────────────────────────── */
+[data-baseweb="tab-list"] {
+    border-bottom: 1px solid var(--border) !important;
+    gap: .15rem !important;
+    background: transparent !important;
+}
+[data-baseweb="tab"] {
+    background: transparent !important;
+    color: var(--muted) !important;
+    border: none !important;
+    padding: .55rem 1rem !important;
+    font-weight: 500 !important;
+    font-size: .82rem !important;
+}
+[data-baseweb="tab"]:hover { color: var(--text) !important; }
+[data-baseweb="tab"][aria-selected="true"] {
+    color: var(--text) !important;
+    border-bottom: 2px solid var(--text) !important;
+}
+
+/* ── Plotly ───────────────────────────────────────────────────────────────── */
+.modebar { display: none !important; }
+.js-plotly-plot { border-radius: var(--radius-lg); overflow: hidden; }
+
+/* ── Metric cards (Streamlit native) ──────────────────────────────────────── */
+[data-testid="stMetric"] {
+    background: var(--card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-lg) !important;
+    padding: .9rem 1rem !important;
+}
+[data-testid="stMetricLabel"] { color: var(--muted) !important; font-size: .7rem !important; }
+[data-testid="stMetricValue"] { color: var(--text) !important; font-family: var(--font-mono) !important; }
+
+/* ── Caption ──────────────────────────────────────────────────────────────── */
+[data-testid="stCaptionContainer"], .caption, small {
+    color: var(--dim) !important; font-size: .72rem !important; font-weight: 400 !important;
+}
+
+/* ── Code blocks ──────────────────────────────────────────────────────────── */
+code {
+    font-family: var(--font-mono) !important;
+    background: var(--card-2) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    padding: 1px 5px !important;
+    font-size: .76rem !important;
+    color: var(--text-2) !important;
+}
+
+/* ── Footer ───────────────────────────────────────────────────────────────── */
+.site-foot {
+    text-align: center; font-size: .7rem; color: var(--dim);
+    border-top: 1px solid var(--border); padding-top: 1.25rem; margin-top: 2.5rem;
+    font-weight: 400;
+}
+.site-foot span { display: inline-flex; align-items: center; gap: .35rem; }
+
+/* ── Selection ────────────────────────────────────────────────────────────── */
+::selection { background: rgba(96,165,250,.25); color: var(--text); }
+
+/* ── Small helpers ────────────────────────────────────────────────────────── */
+.pill {
+    display: inline-flex; align-items: center; padding: 2px 8px;
+    border-radius: 999px; font-size: .68rem; font-weight: 600;
+    letter-spacing: .03em; text-transform: uppercase; font-family: var(--font-mono);
+}
+.pill.long  { background: rgba(16,185,129,.12); color: var(--pos); border: 1px solid rgba(16,185,129,.25); }
+.pill.short { background: rgba(239,68,68,.12);  color: var(--neg); border: 1px solid rgba(239,68,68,.25); }
+.pill.watch { background: rgba(245,158,11,.12); color: var(--warn); border: 1px solid rgba(245,158,11,.25); }
+.pill.open  { background: var(--card-2); color: var(--muted); border: 1px solid var(--border-2); }
+
+.mono { font-family: var(--font-mono); }
+.muted { color: var(--muted); }
 </style>
 """, unsafe_allow_html=True)
 
-# ─── Plotly base layout (applied to every chart) ──────────────────────────────
-_PL = dict(
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PLOTLY THEME (minimal, neutral palette)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_PLOT_BG = "#0f0f0f"
+_PLOT_FONT = dict(color=C_TEXT, family="Inter, -apple-system, sans-serif", size=11)
+_PLOT_MONO = dict(family="JetBrains Mono, monospace", size=10)
+
+_PL: Dict[str, Any] = dict(
     template="plotly_dark",
-    paper_bgcolor="#0f141d",
-    plot_bgcolor="#0f141d",
-    font=dict(color="#e6edf3", family="Inter, -apple-system, sans-serif", size=11),
-    margin=dict(l=48, r=18, t=35, b=42),
-    xaxis=dict(gridcolor="#1f2937", zerolinecolor="#1f2937", linecolor="#2a3447",
-               tickfont=dict(family="JetBrains Mono, monospace", size=10)),
-    yaxis=dict(gridcolor="#1f2937", zerolinecolor="#1f2937", linecolor="#2a3447",
-               tickfont=dict(family="JetBrains Mono, monospace", size=10)),
-    legend=dict(bgcolor="rgba(15,20,29,.6)", bordercolor="#1f2937",
-                font=dict(size=10, color="#8b94a3")),
+    paper_bgcolor=_PLOT_BG,
+    plot_bgcolor=_PLOT_BG,
+    font=_PLOT_FONT,
+    margin=dict(l=48, r=18, t=24, b=42),
+    xaxis=dict(gridcolor=C_GRID, zerolinecolor=C_GRID, linecolor=C_AXIS,
+               tickfont=_PLOT_MONO, title_font=dict(size=11, color=C_TEXT)),
+    yaxis=dict(gridcolor=C_GRID, zerolinecolor=C_GRID, linecolor=C_AXIS,
+               tickfont=_PLOT_MONO, title_font=dict(size=11, color=C_TEXT)),
+    legend=dict(bgcolor="rgba(15,15,15,.6)", bordercolor=C_GRID,
+                font=dict(size=10, color=C_TEXT)),
+    hoverlabel=dict(bgcolor="#1a1a1a", bordercolor="#3f3f46",
+                    font=dict(family="JetBrains Mono, monospace", size=11,
+                              color="#fafafa")),
 )
 
 
-def ply(**overrides):
+def ply(**overrides) -> Dict[str, Any]:
     """Merge overrides into the base Plotly layout dict."""
     out = dict(_PL)
-    out.update(overrides)
+    for k, v in overrides.items():
+        if isinstance(v, dict) and k in out and isinstance(out[k], dict):
+            merged = dict(out[k])
+            merged.update(v)
+            out[k] = merged
+        else:
+            out[k] = v
     return out
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # DATABASE
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _db() -> sqlite3.Connection:
-    """Return a new per-call SQLite connection (thread-safe by isolation)."""
     if not DB_PATH.exists():
         st.error(
             f"**Database not found:** `{DB_PATH}`\n\n"
@@ -1201,8 +795,7 @@ def _db() -> sqlite3.Connection:
     return conn
 
 
-def qdf(sql: str, params=()) -> pd.DataFrame:
-    """Execute a SQL SELECT and return a pandas DataFrame."""
+def qdf(sql: str, params: tuple = ()) -> pd.DataFrame:
     try:
         return pd.read_sql_query(sql, _db(), params=params)
     except Exception as exc:
@@ -1213,8 +806,8 @@ def qdf(sql: str, params=()) -> pd.DataFrame:
 @st.cache_data(ttl=30)
 def load_recs(status: str = "") -> pd.DataFrame:
     if status:
-        sql = "SELECT * FROM recommendations WHERE status = ? ORDER BY timestamp DESC"
-        df = qdf(sql, params=(status,))
+        df = qdf("SELECT * FROM recommendations WHERE status = ? ORDER BY timestamp DESC",
+                 params=(status,))
     else:
         df = qdf("SELECT * FROM recommendations ORDER BY timestamp DESC")
     if not df.empty and "timestamp" in df.columns:
@@ -1229,17 +822,20 @@ def load_stats() -> pd.DataFrame:
 
 @st.cache_data(ttl=30)
 def load_lookbacks() -> pd.DataFrame:
-    df = qdf("SELECT symbol, days, generated_at, summary FROM lookback_memory ORDER BY generated_at DESC")
+    df = qdf(
+        "SELECT symbol, days, generated_at, summary FROM lookback_memory "
+        "ORDER BY generated_at DESC"
+    )
     if not df.empty and "generated_at" in df.columns:
         df["generated_at"] = pd.to_datetime(df["generated_at"], utc=True, errors="coerce")
     return df
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # EXTERNAL DATA
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
-def _get(url: str, params: dict = None, timeout: int = 10) -> Optional[Any]:
+def _get(url: str, params: Optional[dict] = None, timeout: int = 10) -> Optional[Any]:
     try:
         r = requests.get(url, params=params, timeout=timeout)
         r.raise_for_status()
@@ -1249,25 +845,29 @@ def _get(url: str, params: dict = None, timeout: int = 10) -> Optional[Any]:
 
 
 @st.cache_data(ttl=60)
-def fetch_fg() -> Dict:
+def fetch_fg() -> Dict[str, Any]:
     data = _get(f"{ALT_ME_BASE}/fng/", {"limit": 30})
     if not data or "data" not in data:
-        return {"current": 50, "label": "Neutral", "history": []}
+        return {"current": None, "label": "", "history": []}
     entries = data["data"]
-    return {
-        "current": int(entries[0]["value"]),
-        "label": entries[0].get("value_classification", "Neutral"),
-        "history": [{"ts": int(e["timestamp"]), "val": int(e["value"])} for e in entries],
-    }
+    try:
+        return {
+            "current": int(entries[0]["value"]),
+            "label":   entries[0].get("value_classification", ""),
+            "history": [{"ts": int(e["timestamp"]), "val": int(e["value"])}
+                        for e in entries],
+        }
+    except Exception:
+        return {"current": None, "label": "", "history": []}
 
 
 @st.cache_data(ttl=60)
 def fetch_prices(symbols: tuple) -> Dict[str, float]:
-    """Batch fetch current USD prices from CoinGecko."""
     if not symbols:
         return {}
     ids = ",".join(CG_ID.get(s.upper(), s.lower()) for s in symbols)
-    data = _get(f"{COINGECKO_BASE}/simple/price", {"ids": ids, "vs_currencies": "usd"})
+    data = _get(f"{COINGECKO_BASE}/simple/price",
+                {"ids": ids, "vs_currencies": "usd"})
     if not data:
         return {}
     result: Dict[str, float] = {}
@@ -1291,103 +891,218 @@ def fetch_sparkline(symbol: str, days: int = 7) -> List[float]:
     return [p[1] for p in data.get("prices", [])]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# HELPERS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# NULL-SAFE FORMAT HELPERS — single source of truth for all data rendering
+# ══════════════════════════════════════════════════════════════════════════════
 
-def fp(v: Optional[float]) -> str:
-    """Format a price value. Safe against None and NaN."""
+def present(v: Any) -> bool:
+    """True if v is a non-null, non-empty, non-NaN value."""
     if v is None:
-        return "—"
+        return False
     try:
         if pd.isna(v):
-            return "—"
+            return False
     except (TypeError, ValueError):
         pass
-    try:
-        v = float(v)
-    except (TypeError, ValueError):
-        return "—"
-    if v < 0.001:
-        return f"${v:.6f}"
-    if v < 1:
-        return f"${v:.4f}"
-    return f"${v:,.2f}"
+    if isinstance(v, str) and not v.strip():
+        return False
+    return True
 
 
-def fpc(v: Optional[float], sign: bool = True) -> str:
-    """Format a percentage value."""
-    if v is None or (isinstance(v, float) and (v != v)):  # None or NaN
-        return "—"
-    s = "+" if v > 0 and sign else ""
-    return f"{s}{v:.2f}%"
-
-
-def kpi(label: str, value: str, sub: str = "", cls: str = "") -> None:
-    """Render an HTML KPI card."""
-    st.markdown(
-        f'<div class="kpi">'
-        f'<div class="kpi-label">{label}</div>'
-        f'<div class="kpi-val {cls}">{value}</div>'
-        f'{"<div class=kpi-sub>" + sub + "</div>" if sub else ""}'
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
-
-def sec(title: str) -> None:
-    """Render a section header."""
-    st.markdown(f'<div class="sec-hdr">{title}</div>', unsafe_allow_html=True)
-
-
-def unrealized_pnl(rec: pd.Series, current: float) -> Optional[float]:
-    entry = rec.get("entry_price")
-    if not entry or entry == 0 or current is None:
+def num(v: Any) -> Optional[float]:
+    """Coerce v to float if it's a real number, else None."""
+    if not present(v):
         return None
-    direction = str(rec.get("recommendation", "LONG"))
-    raw = (current - entry) / entry * 100
-    return round(-raw if direction == "SHORT" else raw, 2)
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f:  # NaN
+        return None
+    return f
 
 
-def fmt_pnl_cell_color(col: pd.Series) -> List[str]:
-    """Return per-cell CSS text-color styles for a P&L string column (green=positive, red=negative)."""
-    styles = []
-    for v in col:
-        s = str(v)
-        if s.startswith("+"):    styles.append("color:#00ff88")
-        elif s.startswith("-"):  styles.append("color:#ff4757")
-        else:                    styles.append("")
-    return styles
+def fmt_price(v: Any) -> str:
+    f = num(v)
+    if f is None:
+        return EM_DASH
+    if f == 0:
+        return "$0.00"
+    if abs(f) < 0.001:
+        return f"${f:.6f}"
+    if abs(f) < 1:
+        return f"${f:.4f}"
+    return f"${f:,.2f}"
 
 
-def sharpe_ratio(returns: List[float]) -> float:
-    if len(returns) < 2:
-        return 0.0
-    arr = np.array(returns, dtype=float)
-    sd = arr.std()
-    return round(float(arr.mean() / sd), 2) if sd else 0.0
+def fmt_pct(v: Any, sign: bool = True, digits: int = 2) -> str:
+    f = num(v)
+    if f is None:
+        return EM_DASH
+    s = "+" if (sign and f > 0) else ""
+    return f"{s}{f:.{digits}f}%"
 
 
-def held_for(ts) -> str:
-    if ts is None:
-        return "—"
+def fmt_usd(v: Any, sign: bool = False) -> str:
+    f = num(v)
+    if f is None:
+        return EM_DASH
+    if sign:
+        if f > 0: return f"+${f:,.0f}"
+        if f < 0: return f"-${abs(f):,.0f}"
+        return "$0"
+    return f"${f:,.0f}"
+
+
+def fmt_int(v: Any) -> str:
+    f = num(v)
+    if f is None:
+        return EM_DASH
+    return f"{int(f):,}"
+
+
+def fmt_conf(v: Any) -> str:
+    f = num(v)
+    if f is None:
+        return EM_DASH
+    return f"{f:.1f}/10"
+
+
+def fmt_ts(v: Any, fmt: str = "%Y-%m-%d %H:%M") -> str:
+    if not present(v):
+        return EM_DASH
+    try:
+        return v.strftime(fmt)
+    except (ValueError, AttributeError, TypeError):
+        pass
+    try:
+        return pd.to_datetime(v, utc=True).strftime(fmt)
+    except Exception:
+        return EM_DASH
+
+
+def fmt_text(v: Any, fallback: str = EM_DASH,
+             max_len: Optional[int] = None) -> str:
+    if not present(v):
+        return fallback
+    s = str(v).strip()
+    if max_len and len(s) > max_len:
+        return s[: max_len - 1] + "…"
+    return s
+
+
+def held_for(ts: Any) -> str:
+    if not present(ts):
+        return EM_DASH
     try:
         now = datetime.now(timezone.utc)
         if hasattr(ts, "tzinfo") and ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         secs = (now - ts).total_seconds()
-        if secs < 3600:
-            return f"{int(secs // 60)}m"
-        if secs < 86400:
-            return f"{int(secs // 3600)}h"
+        if secs < 60:    return f"{int(secs)}s"
+        if secs < 3600:  return f"{int(secs // 60)}m"
+        if secs < 86400: return f"{int(secs // 3600)}h"
         return f"{int(secs // 86400)}d"
     except Exception:
-        return "—"
+        return EM_DASH
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR + AUTO-REFRESH
-# ═══════════════════════════════════════════════════════════════════════════════
+def unrealized_pnl_pct(rec: pd.Series, current: Any) -> Optional[float]:
+    entry = num(rec.get("entry_price"))
+    cur   = num(current)
+    if entry is None or cur is None or entry == 0:
+        return None
+    direction = str(rec.get("recommendation") or "LONG").upper()
+    raw = (cur - entry) / entry * 100
+    return round(-raw if direction == "SHORT" else raw, 2)
+
+
+def unrealized_pnl_usd(rec: pd.Series, current: Any) -> Optional[float]:
+    entry = num(rec.get("entry_price"))
+    cur   = num(current)
+    psize = num(rec.get("position_size_usd"))
+    if entry is None or cur is None or psize is None or entry == 0:
+        return None
+    direction = str(rec.get("recommendation") or "LONG").upper()
+    raw = (cur - entry) / entry
+    raw = -raw if direction == "SHORT" else raw
+    return round(raw * psize, 2)
+
+
+def sharpe(returns: Iterable[Any]) -> Optional[float]:
+    vals = [num(r) for r in returns if num(r) is not None]
+    if len(vals) < 2:
+        return None
+    arr = np.array(vals, dtype=float)
+    sd = arr.std()
+    return round(float(arr.mean() / sd), 2) if sd else None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# UI COMPONENTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def kpi(label: str, value: str, sub: str = "", tone: str = "") -> None:
+    """Render a single KPI card. tone in {'pos','neg','dim',''}."""
+    cls = f"kpi-val {tone}".strip()
+    sub_html = f'<div class="kpi-sub">{sub}</div>' if sub else ""
+    st.markdown(
+        f'<div class="kpi">'
+        f'<div class="kpi-label">{label}</div>'
+        f'<div class="{cls}">{value}</div>'
+        f'{sub_html}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def sec(title: str) -> None:
+    """Render a section heading."""
+    st.markdown(f'<div class="sec">{title}</div>', unsafe_allow_html=True)
+
+
+def empty(title: str, hint: str = "") -> None:
+    """Render a consistent empty-state block."""
+    hint_html = f'<div>{hint}</div>' if hint else ""
+    st.markdown(
+        f'<div class="empty">'
+        f'<div class="empty-title">{title}</div>'
+        f'{hint_html}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def direction_pill(direction: Any) -> str:
+    """Return an HTML pill for LONG/SHORT/WATCH/etc."""
+    s = fmt_text(direction, fallback="")
+    u = s.upper()
+    cls = {"LONG": "long", "SHORT": "short", "WATCH": "watch"}.get(u, "open")
+    return f'<span class="pill {cls}">{s or EM_DASH}</span>'
+
+
+def tone_from_num(v: Any) -> str:
+    """Return CSS tone class from a numeric value."""
+    f = num(v)
+    if f is None or f == 0:
+        return "dim"
+    return "pos" if f > 0 else "neg"
+
+
+def color_pnl_column(col: pd.Series) -> List[str]:
+    """Per-cell text colors for a P&L string column."""
+    styles = []
+    for v in col:
+        s = str(v) if v is not None else ""
+        if s.startswith("+"):   styles.append(f"color:{C_POS}")
+        elif s.startswith("-"): styles.append(f"color:{C_NEG}")
+        else:                   styles.append("")
+    return styles
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ══════════════════════════════════════════════════════════════════════════════
 
 NAV_ITEMS = [
     ("Overview",          "grid"),
@@ -1402,34 +1117,26 @@ NAV_ITEMS = [
 
 def sidebar() -> str:
     with st.sidebar:
-        # ── Brand ──────────────────────────────────────────────────────────
-        brand_icon = _icon("logo", 22, "url(#brand-grad)")
+        # Brand
+        brand_svg = _icon("logo", 16, "currentColor")
         st.markdown(
-            f'<svg width="0" height="0" style="position:absolute">'
-            f'<defs><linearGradient id="brand-grad" x1="0" x2="1" y1="0" y2="1">'
-            f'<stop offset="0" stop-color="#38d0ff"/><stop offset="1" stop-color="#00e389"/>'
-            f'</linearGradient></defs></svg>'
             f'<div class="brand">'
-            f'  <div class="brand-mark">{brand_icon}</div>'
-            f'  <div class="brand-text-wrap">'
+            f'  <div class="brand-mark">{brand_svg}</div>'
+            f'  <div>'
             f'    <div class="brand-name">Analyst Team</div>'
-            f'    <div class="brand-sub">Intelligence&nbsp;Terminal</div>'
+            f'    <div class="brand-sub">Crypto Intel</div>'
             f'  </div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            '<div style="height:1px;background:linear-gradient(90deg,transparent,var(--border2),transparent);'
-            'margin:.7rem 0 .4rem"></div>',
+            f'</div>'
+            f'<hr class="divider"/>',
             unsafe_allow_html=True,
         )
 
-        # ── Nav (button-based pills, true SPA feel) ────────────────────────
+        # Init nav state
         if "page" not in st.session_state:
             st.session_state["page"] = NAV_ITEMS[0][0]
 
-        st.markdown('<div class="nav-shell">', unsafe_allow_html=True)
-        for name, icon_name in NAV_ITEMS:
+        # Nav
+        for name, _icon_key in NAV_ITEMS:
             is_active = st.session_state["page"] == name
             if st.button(
                 name,
@@ -1439,618 +1146,702 @@ def sidebar() -> str:
             ):
                 st.session_state["page"] = name
                 st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-        page = st.session_state["page"]
 
-        st.markdown(
-            '<div style="height:1px;background:linear-gradient(90deg,transparent,var(--border2),transparent);'
-            'margin:.8rem 0 .4rem"></div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown('<hr class="divider"/>', unsafe_allow_html=True)
 
-        # ── Live indicator ─────────────────────────────────────────────────
+        # Live indicator
         if "last_refresh" not in st.session_state:
             st.session_state["last_refresh"] = time.time()
-        elapsed = time.time() - st.session_state["last_refresh"]
-        remaining = max(0, AUTO_REFRESH_SEC - elapsed)
+        elapsed   = time.time() - st.session_state["last_refresh"]
+        remaining = max(0, AUTO_REFRESH_SEC - int(elapsed))
 
         st.markdown(
-            f"<div style='font-size:.7rem;color:var(--muted);text-align:center;"
-            f"letter-spacing:.08em;padding:.3rem 0'>"
-            f"<span class='dot'></span>LIVE &nbsp;·&nbsp; next refresh {int(remaining)}s"
-            f"</div>",
+            f'<div class="live-indicator">'
+            f'<span class="live-dot"></span>'
+            f'LIVE · {remaining}s'
+            f'</div>',
             unsafe_allow_html=True,
         )
 
-        refresh_ico = _icon("refresh", 13, "currentColor")
-        st.markdown(
-            """
-            <style>
-            .refresh-btn-wrap .stButton button {
-                background: linear-gradient(180deg, rgba(56,208,255,.08), rgba(0,227,137,.04)) !important;
-                border: 1px solid var(--border2) !important;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-        if st.button("Refresh data", use_container_width=True, key="refresh-now"):
+        if st.button("Refresh", use_container_width=True, key="refresh-now"):
             st.cache_data.clear()
             st.session_state["last_refresh"] = time.time()
             st.rerun()
 
+        # Auto-refresh
         if elapsed >= AUTO_REFRESH_SEC:
             st.cache_data.clear()
             st.session_state["last_refresh"] = time.time()
             st.rerun()
 
-        st.markdown(
-            f"<div style='font-size:.6rem;color:var(--dim);text-align:center;"
-            f"margin-top:.55rem;letter-spacing:.08em;font-family:var(--font-mono)'>"
-            f"LAST UPDATE · {datetime.now().strftime('%H:%M:%S')}</div>",
-            unsafe_allow_html=True,
-        )
-
-    return page
+    return st.session_state["page"]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # PAGE 1 — OVERVIEW
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
-def page_overview():
-    page_title("grid", "Overview", "Team-level performance at a glance")
+def page_overview() -> None:
+    page_title("grid", "Overview", "Team performance at a glance")
 
-    all_recs  = load_recs()
-    closed    = all_recs[all_recs["status"] == "CLOSED"] if not all_recs.empty else pd.DataFrame()
-    open_recs = all_recs[all_recs["status"] == "OPEN"]   if not all_recs.empty else pd.DataFrame()
+    all_recs = load_recs()
+    if all_recs.empty:
+        empty("No recommendations yet",
+              "Start the analyst chat to generate calls — they'll appear here in real time.")
+        return
+
+    closed    = all_recs[all_recs["status"] == "CLOSED"]
+    open_recs = all_recs[all_recs["status"] == "OPEN"]
 
     total_closed = len(closed)
-    wins         = int((closed["outcome_pct"] > 0).sum()) if not closed.empty else 0
-    win_rate     = round(wins / total_closed * 100, 1) if total_closed else 0.0
-    _pnl_raw     = closed["outcome_pct"].dropna().sum() if not closed.empty else 0.0
-    total_pnl    = 0.0 if (_pnl_raw != _pnl_raw) else float(_pnl_raw)  # NaN guard
-    open_count   = len(open_recs)
-    _conf_raw    = all_recs["confidence"].dropna().mean() if not all_recs.empty and "confidence" in all_recs else 0.0
-    avg_conf     = 0.0 if (_conf_raw != _conf_raw) else round(float(_conf_raw), 1)  # NaN guard
+    wins = int((closed["outcome_pct"].dropna() > 0).sum()) if not closed.empty else 0
+    win_rate = round(wins / total_closed * 100, 1) if total_closed else None
+    total_pnl_pct = num(closed["outcome_pct"].dropna().sum()) if not closed.empty else 0.0
+    avg_conf = num(all_recs["confidence"].dropna().mean()) if "confidence" in all_recs else None
 
-    # ── Dollar P&L metrics ────────────────────────────────────────────────
-    realized_pnl_usd = 0.0
-    if not closed.empty and "position_size_usd" in closed.columns and "outcome_pct" in closed.columns:
-        _mask = closed["position_size_usd"].notna() & closed["outcome_pct"].notna()
-        realized_pnl_usd = float(
-            (closed.loc[_mask, "outcome_pct"] / 100 * closed.loc[_mask, "position_size_usd"]).sum()
-        )
+    realized_usd = 0.0
+    if not closed.empty and "position_size_usd" in closed.columns:
+        mask = closed["position_size_usd"].notna() & closed["outcome_pct"].notna()
+        if mask.any():
+            realized_usd = float(
+                (closed.loc[mask, "outcome_pct"] / 100 *
+                 closed.loc[mask, "position_size_usd"]).sum()
+            )
 
-    deployed_capital = 0.0
+    deployed_usd = 0.0
     if not open_recs.empty and "position_size_usd" in open_recs.columns:
-        deployed_capital = float(open_recs["position_size_usd"].dropna().sum())
+        deployed_usd = float(open_recs["position_size_usd"].dropna().sum())
 
-    # ── KPI Row ───────────────────────────────────────────────────────────
+    # ── KPI row ─────────────────────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
-    with c1: kpi("Team Win Rate",    f"{win_rate}%",       f"{total_closed} closed calls",   "pos" if win_rate >= 50 else "neg")
-    with c2: kpi("Total Calls",      str(len(all_recs)),   f"{open_count} open · {total_closed} closed", "info")
-    with c3: kpi("Closed P&L",       fpc(total_pnl),       "sum of all outcomes",             "pos" if total_pnl >= 0 else "neg")
-    with c4: kpi("Open Positions",   str(open_count),      "tracked recommendations",         "info")
-    with c5: kpi("Avg Confidence",   f"{avg_conf}/10",     "across all calls",                "info")
+    with c1:
+        tone = "dim" if win_rate is None else ("pos" if win_rate >= 50 else "neg")
+        kpi("Team Win Rate",
+            (f"{win_rate:.1f}%" if win_rate is not None else EM_DASH),
+            f"{total_closed} closed", tone)
+    with c2:
+        kpi("Total Calls", fmt_int(len(all_recs)),
+            f"{len(open_recs)} open · {total_closed} closed")
+    with c3:
+        kpi("Closed P&L %", fmt_pct(total_pnl_pct),
+            "sum of outcomes", tone_from_num(total_pnl_pct))
+    with c4:
+        kpi("Open Positions", fmt_int(len(open_recs)), "tracked calls")
+    with c5:
+        kpi("Avg Confidence",
+            (f"{avg_conf:.1f}/10" if avg_conf is not None else EM_DASH),
+            "across all calls")
 
-    # ── Dollar KPI Row ────────────────────────────────────────────────────
-    if realized_pnl_usd > 0:
-        _rpnl_str = f"+${realized_pnl_usd:,.0f}"
-    elif realized_pnl_usd < 0:
-        _rpnl_str = f"-${abs(realized_pnl_usd):,.0f}"
-    else:
-        _rpnl_str = "$0"
-    _dep_str = f"${deployed_capital:,.0f}" if deployed_capital > 0 else "—"
+    # ── Dollar KPI row ──────────────────────────────────────────────────────
     d1, d2 = st.columns(2)
-    with d1: kpi("Total Realized P&L $", _rpnl_str, "closed positions w/ size data",  "pos" if realized_pnl_usd >= 0 else "neg")
-    with d2: kpi("Total Deployed Capital", _dep_str, "sum of open position sizes", "info")
+    with d1:
+        kpi("Realized P&L", fmt_usd(realized_usd, sign=True),
+            "closed positions w/ size", tone_from_num(realized_usd))
+    with d2:
+        kpi("Deployed Capital",
+            fmt_usd(deployed_usd) if deployed_usd > 0 else EM_DASH,
+            "sum of open position sizes")
 
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── Fear & Greed | Recent calls ────────────────────────────────────────
+    # ── Fear & Greed | Recent calls ─────────────────────────────────────────
     col_fg, col_right = st.columns([1, 2])
 
     with col_fg:
-        sec("Fear & Greed Index")
+        sec("Fear & Greed")
         fg = fetch_fg()
-        v  = fg["current"]
+        v = fg["current"]
+        if v is None:
+            empty("Fear & Greed unavailable",
+                  "Live index temporarily unreachable.")
+        else:
+            if   v < 25: gc = C_NEG
+            elif v < 45: gc = C_WARN
+            elif v < 55: gc = "#eab308"
+            elif v < 75: gc = "#84cc16"
+            else:        gc = C_POS
 
-        # Gauge colour zones
-        if   v < 25: gc = "#ff4757"
-        elif v < 45: gc = "#ff7f50"
-        elif v < 55: gc = "#ffd700"
-        elif v < 75: gc = "#7fff00"
-        else:        gc = "#00ff88"
-
-        fig_g = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=v,
-            title={"text": fg["label"], "font": {"size": 13, "color": gc}},
-            gauge={
-                "axis": {"range": [0, 100], "tickcolor": "#8b949e", "tickfont": {"size": 9}},
-                "bar":  {"color": gc, "thickness": 0.28},
-                "bgcolor": "#161b22",
-                "borderwidth": 0,
-                "steps": [
-                    {"range": [0,  25], "color": "rgba(255,71,87,.18)"},
-                    {"range": [25, 45], "color": "rgba(255,127,80,.15)"},
-                    {"range": [45, 55], "color": "rgba(255,215,0,.12)"},
-                    {"range": [55, 75], "color": "rgba(127,255,0,.13)"},
-                    {"range": [75,100], "color": "rgba(0,255,136,.18)"},
-                ],
-                "threshold": {"line": {"color": gc, "width": 3},
-                              "thickness": 0.72, "value": v},
-            },
-            number={"font": {"size": 34, "color": gc, "family": "Courier New"}},
-        ))
-        fig_g.update_layout(height=215, paper_bgcolor="#161b22",
-                            font=dict(color="#8b949e"), margin=dict(l=15,r=15,t=30,b=5))
-        st.plotly_chart(fig_g, use_container_width=True, config={"displayModeBar": False})
-
-        # 30-day history trend
-        if fg["history"]:
-            hdf = pd.DataFrame(fg["history"])
-            hdf["ts"] = pd.to_datetime(hdf["ts"], unit="s")
-            fig_t = go.Figure(go.Scatter(
-                x=hdf["ts"], y=hdf["val"],
-                fill="tozeroy", fillcolor="rgba(0,212,255,.07)",
-                line=dict(color="#00d4ff", width=1.5), mode="lines",
+            fig = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=v,
+                title={"text": fg["label"] or "",
+                       "font": {"size": 12, "color": gc, "family": "Inter"}},
+                gauge={
+                    "axis": {"range": [0, 100], "tickcolor": C_TEXT,
+                             "tickfont": {"size": 9, "color": C_TEXT}},
+                    "bar": {"color": gc, "thickness": 0.2},
+                    "bgcolor": "#0f0f0f",
+                    "borderwidth": 0,
+                    "steps": [
+                        {"range": [0, 25],  "color": "rgba(239,68,68,.12)"},
+                        {"range": [25, 45], "color": "rgba(245,158,11,.10)"},
+                        {"range": [45, 55], "color": "rgba(234,179,8,.08)"},
+                        {"range": [55, 75], "color": "rgba(132,204,22,.10)"},
+                        {"range": [75, 100], "color": "rgba(16,185,129,.12)"},
+                    ],
+                    "threshold": {"line": {"color": gc, "width": 3},
+                                  "thickness": 0.7, "value": v},
+                },
+                number={"font": {"size": 32, "color": gc,
+                                 "family": "JetBrains Mono"}},
             ))
-            fig_t.update_layout(height=90, paper_bgcolor="#161b22", plot_bgcolor="#161b22",
-                                margin=dict(l=0,r=0,t=0,b=0),
-                                xaxis=dict(visible=False), yaxis=dict(range=[0,100],visible=False),
-                                showlegend=False)
-            st.plotly_chart(fig_t, use_container_width=True, config={"displayModeBar": False})
+            fig.update_layout(height=215, paper_bgcolor=_PLOT_BG,
+                              font=dict(color=C_TEXT),
+                              margin=dict(l=10, r=10, t=30, b=5))
+            st.plotly_chart(fig, use_container_width=True,
+                            config={"displayModeBar": False})
+
+            if fg["history"]:
+                hdf = pd.DataFrame(fg["history"])
+                hdf["ts"] = pd.to_datetime(hdf["ts"], unit="s")
+                ftr = go.Figure(go.Scatter(
+                    x=hdf["ts"], y=hdf["val"],
+                    fill="tozeroy", fillcolor="rgba(96,165,250,.06)",
+                    line=dict(color=C_ACC, width=1.2), mode="lines",
+                ))
+                ftr.update_layout(
+                    height=70, paper_bgcolor=_PLOT_BG, plot_bgcolor=_PLOT_BG,
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    xaxis=dict(visible=False),
+                    yaxis=dict(range=[0, 100], visible=False),
+                    showlegend=False,
+                )
+                st.plotly_chart(ftr, use_container_width=True,
+                                config={"displayModeBar": False})
 
     with col_right:
         sec("Recent Calls")
-        if all_recs.empty:
-            st.info("No recommendations yet — start the analyst chat to generate calls.")
-        else:
-            disp = all_recs.head(10)[["timestamp","analyst","symbol","recommendation","confidence","status","outcome_pct"]].copy()
-            disp["timestamp"] = disp["timestamp"].dt.strftime("%m-%d %H:%M")
-            disp["outcome_pct"] = disp["outcome_pct"].apply(lambda x: fpc(x) if x is not None else "OPEN")
-            disp.columns = ["Time","Analyst","Coin","Direction","Conf","Status","P&L"]
-            st.dataframe(disp, use_container_width=True, hide_index=True, height=320)
+        disp = all_recs.head(10).copy()
+        show = pd.DataFrame({
+            "Time":      [fmt_ts(t, "%m-%d %H:%M") for t in disp["timestamp"]],
+            "Analyst":   [fmt_text(a) for a in disp["analyst"]],
+            "Coin":      [fmt_text(s) for s in disp["symbol"]],
+            "Direction": [fmt_text(d) for d in disp["recommendation"]],
+            "Conf":      [fmt_conf(c) for c in disp["confidence"]],
+            "Status":    [fmt_text(s, fallback="") for s in disp["status"]],
+            "Return":    [fmt_pct(o) if s == "CLOSED" else "OPEN"
+                          for o, s in zip(disp["outcome_pct"], disp["status"])],
+        })
+        st.dataframe(show, use_container_width=True, hide_index=True, height=340)
 
-        # Call counts bar
-        if not all_recs.empty:
-            sec("Calls by Analyst")
-            counts = all_recs["analyst"].value_counts().reindex(ANALYST_ORDER, fill_value=0)
-            fig_b = go.Figure(go.Bar(
-                x=counts.index,
-                y=counts.values,
-                marker_color=[ANALYST_COLORS.get(a, "#58a6ff") for a in counts.index],
-                text=counts.values, textposition="outside",
-            ))
-            fig_b.update_layout(**ply(height=170, showlegend=False,
-                                      yaxis=dict(visible=False,**_PL["yaxis"]),
-                                      margin=dict(l=0,r=0,t=10,b=0)))
-            st.plotly_chart(fig_b, use_container_width=True, config={"displayModeBar": False})
+        sec("Calls by Analyst")
+        counts = all_recs["analyst"].value_counts().reindex(ANALYST_ORDER, fill_value=0)
+        fig = go.Figure(go.Bar(
+            x=counts.index, y=counts.values,
+            marker_color=[ANALYST_COLORS.get(a, C_ACC) for a in counts.index],
+            text=counts.values, textposition="outside",
+            textfont=dict(size=10, color=C_TEXT),
+        ))
+        fig.update_layout(**ply(
+            height=160, showlegend=False,
+            yaxis=dict(visible=False, gridcolor=C_GRID, zerolinecolor=C_GRID),
+            margin=dict(l=0, r=0, t=18, b=0),
+        ))
+        st.plotly_chart(fig, use_container_width=True,
+                        config={"displayModeBar": False})
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # PAGE 2 — LEADERBOARD
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
-def page_leaderboard():
-    page_title("trophy", "Analyst Leaderboard", "Ranked track records across the team")
+def page_leaderboard() -> None:
+    page_title("trophy", "Analyst Leaderboard",
+               "Ranked track records across the team")
 
     all_recs = load_recs()
     stats_df = load_stats()
     if all_recs.empty:
-        st.info("No data yet.")
+        empty("No data yet", "Leaderboard appears once the first calls are closed.")
         return
 
-    # ── Build enriched leaderboard ─────────────────────────────────────────
-    rows = []
+    rows: List[Dict[str, Any]] = []
     for analyst in ANALYST_ORDER:
         sub    = all_recs[all_recs["analyst"] == analyst]
         closed = sub[sub["status"] == "CLOSED"]
-        outcomes = closed["outcome_pct"].dropna().tolist()
+        outcomes = [num(o) for o in closed["outcome_pct"] if num(o) is not None]
 
-        # ── Dollar P&L for this analyst ───────────────────────────────────
-        _pnl_usd_parts: List[float] = []
+        pnl_usd_parts: List[float] = []
         if not closed.empty and "position_size_usd" in closed.columns:
-            for _, _cr in closed.iterrows():
-                _pct = _cr.get("outcome_pct")
-                _usd = _cr.get("position_size_usd")
-                if pd.notna(_pct) and pd.notna(_usd):
-                    _pnl_usd_parts.append(float(_pct) / 100 * float(_usd))
-        _analyst_pnl_usd = sum(_pnl_usd_parts) if _pnl_usd_parts else None
+            for _, cr in closed.iterrows():
+                pct = num(cr.get("outcome_pct"))
+                usd = num(cr.get("position_size_usd"))
+                if pct is not None and usd is not None:
+                    pnl_usd_parts.append(pct / 100 * usd)
+        analyst_pnl_usd = sum(pnl_usd_parts) if pnl_usd_parts else None
 
-        s    = stats_df[stats_df["analyst"] == analyst]
-        total = int(s["total_calls"].iloc[0]) if not s.empty else 0
-        wins  = int(s["wins"].iloc[0])         if not s.empty else 0
+        st_row = stats_df[stats_df["analyst"] == analyst]
+        total = int(num(st_row["total_calls"].iloc[0]) or 0) if not st_row.empty else 0
+        wins  = int(num(st_row["wins"].iloc[0]) or 0)        if not st_row.empty else 0
 
-        if _analyst_pnl_usd is not None:
-            _pnl_usd_fmt = f"+${_analyst_pnl_usd:,.0f}" if _analyst_pnl_usd >= 0 else f"-${abs(_analyst_pnl_usd):,.0f}"
-        else:
-            _pnl_usd_fmt = "—"
+        conf_vals = [num(c) for c in sub.get("confidence", []) if num(c) is not None]
 
         rows.append({
-            "Analyst":       analyst,
-            "Calls":         len(sub),
-            "Closed":        total,
-            "Win Rate %":    round(wins / total * 100, 1) if total else 0.0,
-            "Avg Return %":  round(np.mean(outcomes), 2)  if outcomes else 0.0,
-            "Best %":        round(max(outcomes), 2)       if outcomes else 0.0,
-            "Worst %":       round(min(outcomes), 2)       if outcomes else 0.0,
-            "Avg Conf":      round(float(sub["confidence"].dropna().mean()), 1) if not sub.empty and sub["confidence"].notna().any() else 0.0,
-            "Sharpe":        sharpe_ratio(outcomes),
-            "Total P&L $":   _pnl_usd_fmt,
+            "Analyst":      analyst,
+            "Calls":        int(len(sub)),
+            "Closed":       total,
+            "Win Rate %":   round(wins / total * 100, 1) if total else None,
+            "Avg Return %": round(float(np.mean(outcomes)), 2) if outcomes else None,
+            "Best %":       round(float(max(outcomes)), 2) if outcomes else None,
+            "Worst %":      round(float(min(outcomes)), 2) if outcomes else None,
+            "Avg Conf":     round(float(np.mean(conf_vals)), 1) if conf_vals else None,
+            "Sharpe":       sharpe(outcomes),
+            "_pnl_usd":     analyst_pnl_usd,
         })
 
     lb = pd.DataFrame(rows)
 
-    # Sort control
     sort_col = st.selectbox(
         "Sort by",
         ["Win Rate %", "Avg Return %", "Sharpe", "Best %", "Calls"],
         key="lb_sort",
     )
-    lb = lb.sort_values(sort_col, ascending=False).reset_index(drop=True)
+    lb = lb.sort_values(sort_col, ascending=False,
+                        na_position="last").reset_index(drop=True)
     lb.insert(0, "Rank", range(1, len(lb) + 1))
 
     sec("Rankings")
-    styled = (
-        lb.style
-        .background_gradient(subset=["Win Rate %"],   cmap="RdYlGn", vmin=0,   vmax=100)
-        .background_gradient(subset=["Avg Return %"], cmap="RdYlGn", vmin=-20, vmax=20)
-        .format({
-            "Win Rate %":   lambda x: f"{x:.1f}%" if x == x else "—",
-            "Avg Return %": lambda x: fpc(x),
-            "Best %":       lambda x: fpc(x),
-            "Worst %":      lambda x: fpc(x),
-            "Sharpe":       lambda x: f"{x:.2f}" if x == x else "—",
-            "Avg Conf":     lambda x: f"{x:.1f}" if x == x else "—",
-        })
-        .apply(fmt_pnl_cell_color, subset=["Total P&L $"])
-    )
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=240)
 
-    # ── Charts row ─────────────────────────────────────────────────────────
+    disp = pd.DataFrame({
+        "Rank":         lb["Rank"],
+        "Analyst":      lb["Analyst"],
+        "Calls":        lb["Calls"].apply(fmt_int),
+        "Closed":       lb["Closed"].apply(fmt_int),
+        "Win Rate %":   [fmt_pct(v, sign=False, digits=1) if v is not None else EM_DASH
+                         for v in lb["Win Rate %"]],
+        "Avg Return":   [fmt_pct(v) for v in lb["Avg Return %"]],
+        "Best":         [fmt_pct(v) for v in lb["Best %"]],
+        "Worst":        [fmt_pct(v) for v in lb["Worst %"]],
+        "Avg Conf":     [(f"{v:.1f}" if v is not None else EM_DASH)
+                         for v in lb["Avg Conf"]],
+        "Sharpe":       [(f"{v:.2f}" if v is not None else EM_DASH)
+                         for v in lb["Sharpe"]],
+        "Total P&L":    [fmt_usd(v, sign=True) for v in lb["_pnl_usd"]],
+    })
+
+    st.dataframe(
+        disp.style
+            .apply(color_pnl_column, subset=["Avg Return", "Best", "Worst", "Total P&L"]),
+        use_container_width=True, hide_index=True, height=240,
+    )
+
+    # ── Charts ──────────────────────────────────────────────────────────────
     c1, c2 = st.columns(2)
 
     with c1:
-        sec("Win Rate %")
+        sec("Win Rate")
+        wr = lb["Win Rate %"].apply(lambda v: float(v) if v is not None else 0.0)
+        colors = [C_POS if (v is not None and v >= 50)
+                  else C_NEG if (v is not None and v < 50)
+                  else C_GRID
+                  for v in lb["Win Rate %"]]
         fig = go.Figure(go.Bar(
-            x=lb["Analyst"], y=lb["Win Rate %"],
-            marker=dict(color=lb["Win Rate %"],
-                        colorscale=[[0,"#ff4757"],[.5,"#ffd700"],[1,"#00ff88"]],
-                        cmin=0, cmax=100, showscale=False),
-            text=[f"{v:.1f}%" for v in lb["Win Rate %"]], textposition="outside",
+            x=lb["Analyst"], y=wr,
+            marker_color=colors,
+            text=[f"{v:.0f}%" if v is not None else EM_DASH
+                  for v in lb["Win Rate %"]],
+            textposition="outside",
+            textfont=dict(size=10, color=C_TEXT),
         ))
-        fig.add_hline(y=50, line_dash="dash", line_color="#484f58", line_width=1)
-        fig.update_layout(**ply(height=270, showlegend=False,
-                                yaxis=dict(range=[0,115],**_PL["yaxis"])))
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        fig.add_hline(y=50, line_dash="dash", line_color=C_AXIS, line_width=1)
+        fig.update_layout(**ply(
+            height=260, showlegend=False,
+            yaxis=dict(range=[0, 115], gridcolor=C_GRID, zerolinecolor=C_GRID,
+                       linecolor=C_AXIS, tickfont=_PLOT_MONO),
+        ))
+        st.plotly_chart(fig, use_container_width=True,
+                        config={"displayModeBar": False})
 
     with c2:
-        sec("Avg Return %")
+        sec("Avg Return")
+        ar = lb["Avg Return %"].apply(lambda v: float(v) if v is not None else 0.0)
+        colors = [C_POS if (v is not None and v >= 0)
+                  else C_NEG if v is not None else C_GRID
+                  for v in lb["Avg Return %"]]
         fig2 = go.Figure(go.Bar(
-            x=lb["Analyst"], y=lb["Avg Return %"],
-            marker_color=["#00ff88" if v >= 0 else "#ff4757" for v in lb["Avg Return %"]],
-            text=[fpc(v) for v in lb["Avg Return %"]], textposition="outside",
+            x=lb["Analyst"], y=ar,
+            marker_color=colors,
+            text=[fmt_pct(v) for v in lb["Avg Return %"]],
+            textposition="outside",
+            textfont=dict(size=10, color=C_TEXT),
         ))
-        fig2.add_hline(y=0, line_color="#30363d", line_width=1)
-        fig2.update_layout(**ply(height=270, showlegend=False))
-        st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
+        fig2.add_hline(y=0, line_color=C_AXIS, line_width=1)
+        fig2.update_layout(**ply(height=260, showlegend=False))
+        st.plotly_chart(fig2, use_container_width=True,
+                        config={"displayModeBar": False})
 
-    # ── Radar chart ────────────────────────────────────────────────────────
-    sec("Multi-Metric Spider")
+    # ── Radar ───────────────────────────────────────────────────────────────
+    sec("Multi-Metric Profile")
     metrics = ["Win Rate %", "Avg Return %", "Best %", "Avg Conf", "Sharpe"]
-    fig_r = go.Figure()
-
-    for _, row in lb.iterrows():
-        analyst = row["Analyst"]
-        vals = []
-        for m in metrics:
-            col_vals = lb[m]
-            mn, mx = col_vals.min(), col_vals.max()
-            norm = (row[m] - mn) / (mx - mn) if mx != mn else 0.5
-            vals.append(round(norm * 100, 1))
-        vals.append(vals[0])
-
-        hex_c = ANALYST_COLORS.get(analyst, "#58a6ff").lstrip("#")
-        rgba  = tuple(int(hex_c[i:i+2], 16) for i in (0, 2, 4))
-        fig_r.add_trace(go.Scatterpolar(
-            r=vals, theta=metrics + [metrics[0]],
-            fill="toself",
-            fillcolor=f"rgba({rgba[0]},{rgba[1]},{rgba[2]},0.14)",
-            line=dict(color=ANALYST_COLORS.get(analyst, "#58a6ff"), width=2),
-            name=analyst,
-        ))
-
-    fig_r.update_layout(
-        polar=dict(
-            bgcolor="#161b22",
-            radialaxis=dict(visible=True, range=[0,100], gridcolor="#30363d", tickfont=dict(size=8)),
-            angularaxis=dict(gridcolor="#30363d"),
-        ),
-        paper_bgcolor="#161b22", font=dict(color="#e6edf3"),
-        legend=dict(bgcolor="#161b22", bordercolor="#30363d"),
-        height=380, margin=dict(l=60,r=60,t=20,b=20),
+    have_data = any(
+        lb[m].dropna().shape[0] > 0 for m in metrics
     )
-    st.plotly_chart(fig_r, use_container_width=True, config={"displayModeBar": False})
+    if not have_data:
+        empty("Not enough data for the radar chart")
+    else:
+        fig_r = go.Figure()
+        for _, row in lb.iterrows():
+            analyst = row["Analyst"]
+            vals: List[float] = []
+            for m in metrics:
+                v = num(row[m])
+                col_vals = [num(x) for x in lb[m] if num(x) is not None]
+                if not col_vals or v is None:
+                    vals.append(0.0)
+                    continue
+                mn, mx = min(col_vals), max(col_vals)
+                norm = (v - mn) / (mx - mn) if mx != mn else 0.5
+                vals.append(round(norm * 100, 1))
+            vals.append(vals[0])
+
+            hex_c = ANALYST_COLORS.get(analyst, C_ACC).lstrip("#")
+            rgba = tuple(int(hex_c[i:i + 2], 16) for i in (0, 2, 4))
+            fig_r.add_trace(go.Scatterpolar(
+                r=vals, theta=metrics + [metrics[0]],
+                fill="toself",
+                fillcolor=f"rgba({rgba[0]},{rgba[1]},{rgba[2]},.12)",
+                line=dict(color=ANALYST_COLORS.get(analyst, C_ACC), width=1.5),
+                name=analyst,
+            ))
+        fig_r.update_layout(
+            polar=dict(
+                bgcolor=_PLOT_BG,
+                radialaxis=dict(visible=True, range=[0, 100],
+                                gridcolor=C_GRID, tickfont=dict(size=8, color=C_TEXT)),
+                angularaxis=dict(gridcolor=C_GRID,
+                                 tickfont=dict(size=10, color=C_TEXT)),
+            ),
+            paper_bgcolor=_PLOT_BG, font=dict(color=C_TEXT),
+            legend=dict(bgcolor="rgba(15,15,15,.6)", bordercolor=C_GRID),
+            height=380, margin=dict(l=60, r=60, t=20, b=20),
+        )
+        st.plotly_chart(fig_r, use_container_width=True,
+                        config={"displayModeBar": False})
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # PAGE 3 — ACTIVE POSITIONS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
-def page_active():
-    page_title("pulse", "Active Positions", "Open recommendations with live mark-to-market")
+def page_active() -> None:
+    page_title("pulse", "Active Positions",
+               "Open recommendations, marked to live prices")
 
     open_recs = load_recs("OPEN")
     if open_recs.empty:
-        st.info("No open recommendations. Use the analyst chat to generate calls.")
+        empty("No open recommendations",
+              "Generate calls via the analyst chat — they'll show up here automatically.")
         return
 
-    syms   = tuple(open_recs["symbol"].unique().tolist())
+    syms   = tuple(open_recs["symbol"].dropna().unique().tolist())
     prices = fetch_prices(syms)
 
-    # ── Enrich rows ────────────────────────────────────────────────────────
-    rows = []
+    rows: List[Dict[str, Any]] = []
     for _, rec in open_recs.iterrows():
-        sym     = rec["symbol"]
-        cur     = prices.get(sym)
-        entry   = rec.get("entry_price")
-        unreal  = unrealized_pnl(rec, cur) if cur else None
-        target  = rec.get("target_price")
-        stop    = rec.get("stop_loss")
-        direction = str(rec.get("recommendation","LONG"))
+        sym   = fmt_text(rec.get("symbol"), fallback="?")
+        cur   = prices.get(sym)
+        entry = num(rec.get("entry_price"))
+        direction = str(rec.get("recommendation") or "LONG").upper()
+        pos_usd   = num(rec.get("position_size_usd"))
+        pos_pct   = num(rec.get("position_size_pct"))
+        target    = num(rec.get("target_price"))
+        stop      = num(rec.get("stop_loss"))
+        conf      = num(rec.get("confidence"))
 
-        # ── Position size display ─────────────────────────────────────────
-        pos_usd     = rec.get("position_size_usd")
-        pos_pct_val = rec.get("position_size_pct")
-        _pusd_ok    = pd.notna(pos_usd)
-        _ppct_ok    = pd.notna(pos_pct_val)
-        if _pusd_ok:
-            pos_size_str = f"${float(pos_usd):,.0f}"
-            if _ppct_ok:
-                pos_size_str += f" ({float(pos_pct_val):.1f}%)"
-        else:
-            pos_size_str = "—"
+        pos_size_str = EM_DASH
+        if pos_usd is not None:
+            pos_size_str = f"${pos_usd:,.0f}"
+            if pos_pct is not None:
+                pos_size_str += f" · {pos_pct:.1f}%"
 
-        # ── Unrealized P&L $ (uses already-fetched current price) ─────────
-        if cur and entry and entry > 0 and _pusd_ok:
-            _pnl_usd = ((cur - entry) / entry if direction == "LONG" else (entry - cur) / entry) * float(pos_usd)
-            pnl_usd_str = f"+${_pnl_usd:,.0f}" if _pnl_usd >= 0 else f"-${abs(_pnl_usd):,.0f}"
-        else:
-            pnl_usd_str = "—"
+        unr_pct = unrealized_pnl_pct(rec, cur)
+        unr_usd = unrealized_pnl_usd(rec, cur)
 
-        pct_tgt = None
-        pct_stp = None
+        pct_to_tgt = None
+        pct_to_stp = None
         if cur and target:
             raw = (target - cur) / cur * 100
-            pct_tgt = raw if direction == "LONG" else -raw
+            pct_to_tgt = raw if direction == "LONG" else -raw
         if cur and stop:
             raw = (stop - cur) / cur * 100
-            pct_stp = raw if direction == "LONG" else -raw
+            pct_to_stp = raw if direction == "LONG" else -raw
 
         rows.append({
             "Coin":      sym,
-            "Analyst":   rec["analyst"],
+            "Analyst":   fmt_text(rec.get("analyst")),
             "Dir":       direction,
-            "Pos Size":  pos_size_str,
-            "Entry":     fp(entry),
-            "Current":   fp(cur) if cur else "—",
-            "Unreal %":  fpc(unreal) if unreal is not None else "—",
-            "Unreal $":  pnl_usd_str,
-            "Target":    fp(target),
-            "Stop":      fp(stop),
-            "Conf":      f"{int(rec['confidence'])}/10" if rec.get("confidence") else "—",
-            "Open":      held_for(rec.get("timestamp")),
-            "→ Target":  fpc(pct_tgt) if pct_tgt is not None else "—",
-            "→ Stop":    fpc(pct_stp) if pct_stp is not None else "—",
-            "_raw_pnl":  unreal,
+            "Size":      pos_size_str,
+            "Entry":     fmt_price(entry),
+            "Current":   fmt_price(cur) if cur is not None else EM_DASH,
+            "Unreal %":  fmt_pct(unr_pct),
+            "Unreal $":  fmt_usd(unr_usd, sign=True),
+            "Target":    fmt_price(target),
+            "Stop":      fmt_price(stop),
+            "Conf":      (f"{int(conf)}/10" if conf is not None else EM_DASH),
+            "Held":      held_for(rec.get("timestamp")),
+            "→ Tgt":     fmt_pct(pct_to_tgt),
+            "→ Stp":     fmt_pct(pct_to_stp),
+            "_pnl_pct":  unr_pct,
         })
 
     df = pd.DataFrame(rows)
-    profitable = sum(1 for r in rows if r["_raw_pnl"] and r["_raw_pnl"] > 0)
-    longs  = sum(1 for r in rows if r["Dir"] == "LONG")
-    shorts = sum(1 for r in rows if r["Dir"] == "SHORT")
-    avg_u  = float(np.mean([r["_raw_pnl"] for r in rows if r["_raw_pnl"] is not None] or [0]))
 
-    # ── KPI strip ──────────────────────────────────────────────────────────
-    c1,c2,c3 = st.columns(3)
-    with c1: kpi("Open Positions",       str(len(df)),      f"{longs} LONG · {shorts} SHORT", "info")
-    with c2: kpi("Currently Profitable", str(profitable),   f"{len(df)-profitable} at a loss", "pos" if profitable >= len(df)//2 else "neg")
-    with c3: kpi("Avg Unrealized P&L",   fpc(avg_u),        "all open positions", "pos" if avg_u >= 0 else "neg")
+    profitable = sum(1 for r in rows if num(r["_pnl_pct"]) is not None and num(r["_pnl_pct"]) > 0)
+    losing     = sum(1 for r in rows if num(r["_pnl_pct"]) is not None and num(r["_pnl_pct"]) < 0)
+    longs      = sum(1 for r in rows if r["Dir"] == "LONG")
+    shorts     = sum(1 for r in rows if r["Dir"] == "SHORT")
+    pnl_vals   = [num(r["_pnl_pct"]) for r in rows if num(r["_pnl_pct"]) is not None]
+    avg_unr    = float(np.mean(pnl_vals)) if pnl_vals else None
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    # KPIs
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        kpi("Open Positions", fmt_int(len(df)),
+            f"{longs} long · {shorts} short")
+    with c2:
+        tone = "pos" if (len(df) and profitable >= len(df) // 2) else "neg"
+        kpi("Profitable Now", fmt_int(profitable),
+            f"{losing} at a loss",
+            tone if len(df) else "")
+    with c3:
+        kpi("Avg Unrealized", fmt_pct(avg_unr),
+            "across open positions", tone_from_num(avg_unr))
 
-    # ── Table with row colouring ───────────────────────────────────────────
     sec("Open Positions")
-    display = df.drop(columns=["_raw_pnl"])
-
-    def _row_color(row):
-        try:
-            val = float(row["Unreal %"].replace("%","").replace("+",""))
-        except Exception:
-            val = 0
-        if   val >  5: bg = "background-color:rgba(0,255,136,.13)"
-        elif val >  0: bg = "background-color:rgba(0,255,136,.06)"
-        elif val < -5: bg = "background-color:rgba(255,71,87,.13)"
-        elif val <  0: bg = "background-color:rgba(255,71,87,.06)"
-        else:          bg = ""
-        return [bg] * len(row)
+    display = df.drop(columns=["_pnl_pct"])
 
     st.dataframe(
-        display.style
-            .apply(_row_color, axis=1)
-            .apply(fmt_pnl_cell_color, subset=["Unreal %", "Unreal $"]),
+        display.style.apply(color_pnl_column, subset=["Unreal %", "Unreal $"]),
         use_container_width=True,
         hide_index=True,
         height=max(180, 38 * len(display) + 42),
     )
-    st.caption("Unrealized P&L $ is estimated from the last fetched mark price — use 'Refresh data' to update.")
+    st.caption("Unrealized P&L uses the most recent cached spot price. "
+               "Click Refresh in the sidebar to pull fresh marks.")
 
-    # ── P&L bar ────────────────────────────────────────────────────────────
-    pnl_rows = [(f"{r['Coin']}\n{r['Analyst']}", r["_raw_pnl"]) for r in rows if r["_raw_pnl"] is not None]
-    if pnl_rows and prices:
+    # P&L bar
+    pnl_rows = [(f"{r['Coin']} · {r['Analyst']}", num(r['_pnl_pct']))
+                for r in rows if num(r['_pnl_pct']) is not None]
+    if pnl_rows:
         sec("Unrealized P&L by Position")
         lbls, vals = zip(*pnl_rows)
+        colors = [C_POS if v >= 0 else C_NEG for v in vals]
         fig = go.Figure(go.Bar(
             x=list(lbls), y=list(vals),
-            marker_color=["#00ff88" if v >= 0 else "#ff4757" for v in vals],
-            text=[fpc(v) for v in vals], textposition="outside",
+            marker_color=colors,
+            text=[fmt_pct(v) for v in vals],
+            textposition="outside",
+            textfont=dict(size=10, color=C_TEXT),
         ))
-        fig.add_hline(y=0, line_color="#8b949e", line_width=1)
-        fig.update_layout(**ply(height=260, showlegend=False,
-                                xaxis=dict(tickfont=dict(size=9),**_PL["xaxis"])))
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        fig.add_hline(y=0, line_color=C_AXIS, line_width=1)
+        fig.update_layout(**ply(
+            height=260, showlegend=False,
+            xaxis=dict(tickfont=dict(size=9, color=C_TEXT),
+                       gridcolor=C_GRID, zerolinecolor=C_GRID, linecolor=C_AXIS),
+        ))
+        st.plotly_chart(fig, use_container_width=True,
+                        config={"displayModeBar": False})
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 4 — PERFORMANCE OVER TIME
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 4 — PERFORMANCE
+# ══════════════════════════════════════════════════════════════════════════════
 
-def page_performance():
-    page_title("trend-up", "Performance", "Cumulative win rate, returns and distribution over time")
+def page_performance() -> None:
+    page_title("trend-up", "Performance",
+               "Cumulative returns and outcome distribution over time")
 
     all_recs = load_recs()
     if all_recs.empty:
-        st.info("No data yet.")
+        empty("No performance data yet")
         return
 
     closed = all_recs[all_recs["status"] == "CLOSED"].copy()
 
-    # Analyst filter
-    analysts_sel = st.multiselect("Analysts", ANALYST_ORDER, default=ANALYST_ORDER, key="perf_sel")
+    analysts_sel = st.multiselect(
+        "Filter analysts", ANALYST_ORDER, default=ANALYST_ORDER, key="perf_sel"
+    )
+    if not analysts_sel:
+        empty("Select at least one analyst",
+              "Pick analysts above to populate the charts.")
+        return
 
-    # ── Cumulative win rate ────────────────────────────────────────────────
+    # ── Cumulative win rate ─────────────────────────────────────────────────
     sec("Cumulative Win Rate Over Time")
     fig_wr = go.Figure()
+    any_trace = False
     for analyst in analysts_sel:
         sub = closed[closed["analyst"] == analyst].sort_values("timestamp")
         if sub.empty:
             continue
-        wins_cum  = (sub["outcome_pct"] > 0).cumsum()
+        any_trace = True
+        wins_cum  = (sub["outcome_pct"].fillna(0) > 0).cumsum()
         total_cum = pd.Series(range(1, len(sub) + 1), index=sub.index)
         fig_wr.add_trace(go.Scatter(
             x=sub["timestamp"], y=(wins_cum / total_cum * 100),
             mode="lines", name=analyst,
-            line=dict(color=ANALYST_COLORS.get(analyst,"#58a6ff"), width=2),
+            line=dict(color=ANALYST_COLORS.get(analyst, C_ACC), width=1.8),
         ))
-    fig_wr.add_hline(y=50, line_dash="dash", line_color="#484f58", line_width=1)
-    fig_wr.update_layout(**ply(height=300, yaxis=dict(range=[0,105], title="Win Rate %",**_PL["yaxis"])))
-    st.plotly_chart(fig_wr, use_container_width=True, config={"displayModeBar": False})
+    if any_trace:
+        fig_wr.add_hline(y=50, line_dash="dash", line_color=C_AXIS, line_width=1)
+        fig_wr.update_layout(**ply(
+            height=280,
+            yaxis=dict(range=[0, 105], title="Win Rate %",
+                       gridcolor=C_GRID, zerolinecolor=C_GRID,
+                       linecolor=C_AXIS, tickfont=_PLOT_MONO),
+        ))
+        st.plotly_chart(fig_wr, use_container_width=True,
+                        config={"displayModeBar": False})
+    else:
+        empty("No closed calls in this selection")
 
-    # ── Monthly volume | Confidence scatter ────────────────────────────────
+    # ── Volume | Confidence scatter ─────────────────────────────────────────
     c1, c2 = st.columns(2)
 
     with c1:
-        sec("Monthly Call Volume by Analyst")
+        sec("Monthly Call Volume")
         monthly = all_recs.copy()
         monthly["month"] = monthly["timestamp"].dt.strftime("%Y-%m")
-        mc = monthly.groupby(["month","analyst"]).size().reset_index(name="n")
-        fig_m = px.bar(mc, x="month", y="n", color="analyst",
-                       color_discrete_map=ANALYST_COLORS, barmode="stack")
-        fig_m.update_layout(**ply(height=290))
-        st.plotly_chart(fig_m, use_container_width=True, config={"displayModeBar": False})
+        mc = (
+            monthly[monthly["analyst"].isin(analysts_sel)]
+            .groupby(["month", "analyst"]).size().reset_index(name="n")
+        )
+        if not mc.empty:
+            fig_m = px.bar(mc, x="month", y="n", color="analyst",
+                           color_discrete_map=ANALYST_COLORS, barmode="stack")
+            fig_m.update_layout(**ply(height=270))
+            st.plotly_chart(fig_m, use_container_width=True,
+                            config={"displayModeBar": False})
+        else:
+            empty("No volume data")
 
     with c2:
-        sec("Confidence Score vs Actual Return")
-        if not closed.empty and "confidence" in closed.columns:
-            scat = closed.dropna(subset=["confidence","outcome_pct"])
-            if not scat.empty:
-                # Trend line
-                z = np.polyfit(scat["confidence"], scat["outcome_pct"], 1)
-                xr = np.linspace(scat["confidence"].min(), scat["confidence"].max(), 80)
-                fig_s = px.scatter(scat, x="confidence", y="outcome_pct",
-                                   color="analyst", color_discrete_map=ANALYST_COLORS,
-                                   hover_data=["symbol","recommendation"],
-                                   labels={"confidence":"Confidence","outcome_pct":"Return %"})
-                fig_s.add_trace(go.Scatter(x=xr, y=np.poly1d(z)(xr),
-                                           mode="lines", line=dict(color="#8b949e",dash="dash",width=1),
-                                           showlegend=False, name="trend"))
-                fig_s.add_hline(y=0, line_color="#30363d", line_width=1)
-                fig_s.update_layout(**ply(height=290))
-                st.plotly_chart(fig_s, use_container_width=True, config={"displayModeBar": False})
-            else:
-                st.info("Need more closed recommendations.")
-        else:
-            st.info("No closed data yet.")
-
-    # ── Analyst × Coin heatmap ─────────────────────────────────────────────
-    sec("Avg Return % — Analyst × Coin Heatmap")
-    if not closed.empty:
-        heat = (
-            closed.dropna(subset=["outcome_pct"])
-            .groupby(["analyst","symbol"])["outcome_pct"].mean()
-            .reset_index()
-        )
-        if len(heat) >= 2:
-            pivot = heat.pivot(index="analyst", columns="symbol", values="outcome_pct").fillna(0)
-            fig_h = go.Figure(go.Heatmap(
-                z=pivot.values, x=pivot.columns.tolist(), y=pivot.index.tolist(),
-                colorscale=[[0,"#ff4757"],[0.5,"#1c2333"],[1,"#00ff88"]],
-                zmid=0,
-                text=[[f"{v:.1f}%" for v in row] for row in pivot.values],
-                texttemplate="%{text}", textfont=dict(size=11),
-                colorbar=dict(tickfont=dict(color="#8b949e"),
-                              title=dict(text="Avg %",font=dict(color="#8b949e"))),
-            ))
-            fig_h.update_layout(
-                paper_bgcolor="#161b22", font=dict(color="#e6edf3"),
-                margin=dict(l=70,r=20,t=15,b=60),
-                height=max(180, 55 * len(pivot)),
-                xaxis=dict(tickangle=-30),
+        sec("Confidence vs Outcome")
+        scat = closed[closed["analyst"].isin(analysts_sel)].dropna(
+            subset=["confidence", "outcome_pct"])
+        if len(scat) >= 2:
+            z = np.polyfit(scat["confidence"], scat["outcome_pct"], 1)
+            xr = np.linspace(scat["confidence"].min(), scat["confidence"].max(), 80)
+            fig_s = px.scatter(
+                scat, x="confidence", y="outcome_pct",
+                color="analyst", color_discrete_map=ANALYST_COLORS,
+                hover_data=["symbol", "recommendation"],
+                labels={"confidence": "Confidence", "outcome_pct": "Return %"},
             )
-            st.plotly_chart(fig_h, use_container_width=True, config={"displayModeBar": False})
-        else:
-            st.info("Need more analyst/coin combinations for heatmap.")
-    else:
-        st.info("No closed recommendations yet.")
-
-    # ── Cumulative P&L ─────────────────────────────────────────────────────
-    sec("Cumulative P&L Over Time")
-    if not closed.empty:
-        fig_cum = go.Figure()
-        for analyst in analysts_sel:
-            sub = closed[closed["analyst"] == analyst].sort_values("timestamp")
-            if sub.empty:
-                continue
-            fig_cum.add_trace(go.Scatter(
-                x=sub["timestamp"], y=sub["outcome_pct"].cumsum(),
-                mode="lines+markers", name=analyst,
-                line=dict(color=ANALYST_COLORS.get(analyst,"#58a6ff"), width=2),
-                marker=dict(size=5),
+            fig_s.add_trace(go.Scatter(
+                x=xr, y=np.poly1d(z)(xr),
+                mode="lines", line=dict(color=C_AXIS, dash="dash", width=1.2),
+                showlegend=False, name="trend",
             ))
-        fig_cum.add_hline(y=0, line_color="#30363d", line_width=1)
-        fig_cum.update_layout(**ply(height=300,
-                                   yaxis=dict(title="Cumulative P&L %",**_PL["yaxis"])))
-        st.plotly_chart(fig_cum, use_container_width=True, config={"displayModeBar": False})
+            fig_s.add_hline(y=0, line_color=C_AXIS, line_width=1)
+            fig_s.update_layout(**ply(height=270))
+            st.plotly_chart(fig_s, use_container_width=True,
+                            config={"displayModeBar": False})
+        else:
+            empty("Need more closed calls with confidence data")
+
+    # ── Heatmap ─────────────────────────────────────────────────────────────
+    sec("Avg Return — Analyst × Coin")
+    heat = (
+        closed[closed["analyst"].isin(analysts_sel)]
+        .dropna(subset=["outcome_pct"])
+        .groupby(["analyst", "symbol"])["outcome_pct"].mean()
+        .reset_index()
+    )
+    if len(heat) >= 2:
+        pivot = heat.pivot(index="analyst", columns="symbol",
+                           values="outcome_pct").fillna(0)
+        fig_h = go.Figure(go.Heatmap(
+            z=pivot.values, x=pivot.columns.tolist(), y=pivot.index.tolist(),
+            colorscale=[[0, C_NEG], [0.5, "#0f0f0f"], [1, C_POS]],
+            zmid=0,
+            text=[[f"{v:.1f}%" for v in row] for row in pivot.values],
+            texttemplate="%{text}",
+            textfont=dict(size=10, color=C_TEXT, family="JetBrains Mono"),
+            colorbar=dict(tickfont=dict(color=C_TEXT),
+                          title=dict(text="Avg %",
+                                     font=dict(color=C_TEXT, size=10))),
+        ))
+        fig_h.update_layout(
+            paper_bgcolor=_PLOT_BG, plot_bgcolor=_PLOT_BG,
+            font=dict(color=C_TEXT),
+            margin=dict(l=70, r=20, t=20, b=60),
+            height=max(180, 55 * len(pivot)),
+            xaxis=dict(tickangle=-30),
+        )
+        st.plotly_chart(fig_h, use_container_width=True,
+                        config={"displayModeBar": False})
+    else:
+        empty("Need more analyst × coin combinations")
+
+    # ── Cumulative P&L ──────────────────────────────────────────────────────
+    sec("Cumulative P&L %")
+    fig_cum = go.Figure()
+    any_trace = False
+    for analyst in analysts_sel:
+        sub = closed[closed["analyst"] == analyst].sort_values("timestamp")
+        if sub.empty:
+            continue
+        any_trace = True
+        fig_cum.add_trace(go.Scatter(
+            x=sub["timestamp"], y=sub["outcome_pct"].fillna(0).cumsum(),
+            mode="lines+markers", name=analyst,
+            line=dict(color=ANALYST_COLORS.get(analyst, C_ACC), width=1.8),
+            marker=dict(size=4),
+        ))
+    if any_trace:
+        fig_cum.add_hline(y=0, line_color=C_AXIS, line_width=1)
+        fig_cum.update_layout(**ply(
+            height=280,
+            yaxis=dict(title="Cumulative P&L %", gridcolor=C_GRID,
+                       zerolinecolor=C_GRID, linecolor=C_AXIS,
+                       tickfont=_PLOT_MONO),
+        ))
+        st.plotly_chart(fig_cum, use_container_width=True,
+                        config={"displayModeBar": False})
+    else:
+        empty("No closed calls to plot")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # PAGE 5 — HISTORY
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
-def page_history():
-    page_title("list", "Recommendation History", "Full journal of every call, filterable and exportable")
+def page_history() -> None:
+    page_title("list", "Recommendation History",
+               "Full journal of every call, filterable and exportable")
 
     all_recs = load_recs()
     if all_recs.empty:
-        st.info("No recommendation history yet.")
+        empty("No recommendation history yet",
+              "History populates automatically as calls are generated.")
         return
 
-    # ── Filters ────────────────────────────────────────────────────────────
     with st.expander("Filters", expanded=True):
-        f1,f2,f3,f4 = st.columns(4)
-        with f1: af = st.multiselect("Analyst",   ANALYST_ORDER, key="h_a")
-        with f2: df_ = st.multiselect("Direction", ["LONG","SHORT","WATCH","AVOID","NEUTRAL"], key="h_d")
-        with f3: sf = st.multiselect("Status",    ["OPEN","CLOSED","EXPIRED"], key="h_s")
-        with f4: cf = st.multiselect("Coin",      sorted(all_recs["symbol"].unique()), key="h_c")
+        f1, f2, f3, f4 = st.columns(4)
+        with f1:
+            af = st.multiselect("Analyst", ANALYST_ORDER, key="h_a")
+        with f2:
+            df_ = st.multiselect("Direction",
+                                 ["LONG", "SHORT", "WATCH", "AVOID", "NEUTRAL"],
+                                 key="h_d")
+        with f3:
+            sf = st.multiselect("Status",
+                                ["OPEN", "CLOSED", "EXPIRED"], key="h_s")
+        with f4:
+            cf = st.multiselect("Coin",
+                                sorted(all_recs["symbol"].dropna().unique()),
+                                key="h_c")
 
-        d1,d2 = st.columns(2)
-        with d1: date_from = st.date_input("From", value=all_recs["timestamp"].min().date(), key="h_df")
-        with d2: date_to   = st.date_input("To",   value=pd.Timestamp.now().date(),          key="h_dt")
+        d1, d2 = st.columns(2)
+        ts_min = all_recs["timestamp"].min()
+        min_date = ts_min.date() if present(ts_min) else datetime.utcnow().date()
+        with d1:
+            date_from = st.date_input("From", value=min_date, key="h_df")
+        with d2:
+            date_to = st.date_input("To",
+                                    value=pd.Timestamp.now().date(), key="h_dt")
 
-        outcome_f = st.radio("Outcome filter", ["All","Winners only","Losers only"],
+        outcome_f = st.radio("Outcome",
+                             ["All", "Winners", "Losers"],
                              horizontal=True, key="h_out")
 
     filt = all_recs.copy()
@@ -2058,107 +1849,86 @@ def page_history():
     if df_: filt = filt[filt["recommendation"].isin(df_)]
     if sf:  filt = filt[filt["status"].isin(sf)]
     if cf:  filt = filt[filt["symbol"].isin(cf)]
-    filt = filt[(filt["timestamp"].dt.date >= date_from) & (filt["timestamp"].dt.date <= date_to)]
-    if outcome_f == "Winners only": filt = filt[filt["outcome_pct"] > 0]
-    if outcome_f == "Losers only":  filt = filt[filt["outcome_pct"] < 0]
+    filt = filt[filt["timestamp"].notna()]
+    filt = filt[(filt["timestamp"].dt.date >= date_from) &
+                (filt["timestamp"].dt.date <= date_to)]
+    if outcome_f == "Winners":
+        filt = filt[filt["outcome_pct"].fillna(0) > 0]
+    elif outcome_f == "Losers":
+        filt = filt[filt["outcome_pct"].fillna(0) < 0]
 
-    st.markdown(f"<div style='font-size:.74rem;color:#8b949e;margin-bottom:.5rem'>"
-                f"Showing {len(filt)} of {len(all_recs)} recommendations</div>",
-                unsafe_allow_html=True)
+    st.markdown(
+        f'<div style="font-size:.74rem;color:var(--muted);margin:.5rem 0 .75rem">'
+        f'Showing <span class="mono" style="color:var(--text)">{len(filt)}</span> '
+        f'of <span class="mono" style="color:var(--text)">{len(all_recs)}</span> '
+        f'recommendations</div>',
+        unsafe_allow_html=True,
+    )
 
     if filt.empty:
-        st.info("No recommendations match your filters.")
+        empty("No matches", "Try clearing a filter or expanding the date range.")
         return
 
     # Build display DataFrame
-    disp = filt[[
-        "timestamp","analyst","symbol","recommendation",
-        "entry_price","close_price","outcome_pct",
-        "confidence","status","thesis"
-    ]].copy()
-
-    # ── Dollar columns (handle missing position_size_usd gracefully) ──────
-    _pusd_series = (
-        filt["position_size_usd"]
-        if "position_size_usd" in filt.columns
-        else pd.Series([None] * len(filt), index=filt.index)
-    )
-    disp["_pos_usd"] = _pusd_series.values
-    disp["_out_pct"] = disp["outcome_pct"]   # raw float before formatting
-
-    def _fmt_pos_usd(v):
-        try:
-            if pd.isna(v): return "—"
-            return f"${float(v):,.0f}"
-        except Exception: return "—"
-
-    def _fmt_pnl_usd_hist(row):
-        try:
-            pct = row["_out_pct"]
-            usd = row["_pos_usd"]
-            if pd.isna(pct) or pd.isna(usd): return "—"
-            val = float(pct) / 100 * float(usd)
-            return f"+${val:,.0f}" if val >= 0 else f"-${abs(val):,.0f}"
-        except Exception: return "—"
-
-    disp["Pos Size $"] = disp["_pos_usd"].apply(_fmt_pos_usd)
-    disp["P&L $"]      = disp.apply(_fmt_pnl_usd_hist, axis=1)
-    disp = disp.drop(columns=["_pos_usd", "_out_pct"])
-
-    disp["timestamp"]   = disp["timestamp"].dt.strftime("%Y-%m-%d %H:%M")
-    disp["entry_price"] = disp["entry_price"].apply(fp)
-    # Exit: show "OPEN" for unclosed positions (NaN), else formatted price.
-    def _fmt_exit(v):
-        try:
-            if v is None or pd.isna(v):
-                return "OPEN"
-        except (TypeError, ValueError):
-            pass
-        return fp(v)
-    disp["close_price"] = disp["close_price"].apply(_fmt_exit)
-    disp["outcome_pct"] = disp["outcome_pct"].apply(
-        lambda x: fpc(x) if (x is not None and not (isinstance(x, float) and x != x)) else "OPEN"
-    )
-    disp["thesis"]      = disp["thesis"].apply(
-        lambda x: str(x)[:90] + "…" if x and len(str(x)) > 90 else (x or "—"))
-    disp.columns = ["Date","Analyst","Coin","Direction","Entry","Exit","Return %","Conf","Status","Thesis","Pos Size $","P&L $"]
-
-    def _row_bg(row):
-        try: val = float(row["Return %"].replace("%","").replace("+",""))
-        except: val = 0
-        if val > 0: bg = "background-color:rgba(0,255,136,.07)"
-        elif val < 0: bg = "background-color:rgba(255,71,87,.07)"
-        else: bg = ""
-        return [bg]*len(row)
+    disp = pd.DataFrame({
+        "Date":      [fmt_ts(t, "%Y-%m-%d %H:%M") for t in filt["timestamp"]],
+        "Analyst":   [fmt_text(a) for a in filt["analyst"]],
+        "Coin":      [fmt_text(s) for s in filt["symbol"]],
+        "Direction": [fmt_text(d) for d in filt["recommendation"]],
+        "Entry":     [fmt_price(v) for v in filt["entry_price"]],
+        "Exit":      [(fmt_price(v) if present(v) else "OPEN")
+                      for v in filt["close_price"]],
+        "Return":    [(fmt_pct(v) if present(v) else "OPEN")
+                      for v in filt["outcome_pct"]],
+        "Conf":      [fmt_conf(c) for c in filt["confidence"]],
+        "Status":    [fmt_text(s, fallback="") for s in filt["status"]],
+        "Size":      [(f"${num(v):,.0f}" if num(v) is not None else EM_DASH)
+                      for v in filt.get("position_size_usd",
+                                        pd.Series([None]*len(filt)))],
+        "P&L $":     [
+            (lambda pct, usd: (
+                fmt_usd(pct / 100 * usd, sign=True)
+                if num(pct) is not None and num(usd) is not None else EM_DASH
+            ))(filt.iloc[i].get("outcome_pct"),
+               filt.iloc[i].get("position_size_usd")
+               if "position_size_usd" in filt.columns else None)
+            for i in range(len(filt))
+        ],
+        "Thesis":    [fmt_text(t, fallback=EM_DASH, max_len=90)
+                      for t in filt["thesis"]],
+    })
 
     st.dataframe(
-        disp.style
-            .apply(_row_bg, axis=1)
-            .apply(fmt_pnl_cell_color, subset=["Return %", "P&L $"]),
-        use_container_width=True, hide_index=True, height=520)
+        disp.style.apply(color_pnl_column, subset=["Return", "P&L $"]),
+        use_container_width=True, hide_index=True, height=520,
+    )
 
-    # CSV export
     csv = filt.drop(columns=["id"], errors="ignore").to_csv(index=False).encode("utf-8")
     st.download_button(
-        "Export to CSV", data=csv,
+        "Export CSV", data=csv,
         file_name=f"analyst_recs_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # PAGE 6 — COIN ANALYSIS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
-def page_coin():
-    page_title("hex", "Coin Analysis", "Drill into per-asset analyst coverage and outcomes")
+def page_coin() -> None:
+    page_title("hex", "Coin Analysis",
+               "Drill into per-asset analyst coverage and outcomes")
 
     all_recs = load_recs()
     if all_recs.empty:
-        st.info("No data yet.")
+        empty("No coin data yet")
         return
 
-    coins    = sorted(all_recs["symbol"].unique().tolist())
+    coins = sorted(all_recs["symbol"].dropna().unique().tolist())
+    if not coins:
+        empty("No coin data yet")
+        return
+
     selected = st.selectbox("Select coin", coins, key="coin_sel")
     if not selected:
         return
@@ -2168,224 +1938,256 @@ def page_coin():
 
     total_c   = len(coin_recs)
     closed_c  = len(coin_close)
-    wins_c    = int((coin_close["outcome_pct"] > 0).sum()) if not coin_close.empty else 0
-    wr_c      = round(wins_c / closed_c * 100, 1) if closed_c else 0.0
-    _avg_raw  = coin_close["outcome_pct"].dropna().mean() if not coin_close.empty else 0.0
-    avg_ret_c = 0.0 if (_avg_raw != _avg_raw) else round(float(_avg_raw), 2)
+    wins_c    = int((coin_close["outcome_pct"].dropna() > 0).sum()) if not coin_close.empty else 0
+    wr_c      = (wins_c / closed_c * 100) if closed_c else None
+    avg_ret_c = num(coin_close["outcome_pct"].dropna().mean()) if not coin_close.empty else None
     n_analysts = coin_recs["analyst"].nunique()
 
-    # ── KPIs ───────────────────────────────────────────────────────────────
-    c1,c2,c3,c4 = st.columns(4)
-    with c1: kpi("Total Calls",    str(total_c),   f"on {selected}",               "info")
-    with c2: kpi("Win Rate",       f"{wr_c}%",     f"{wins_c}/{closed_c} closed",  "pos" if wr_c>=50 else "neg")
-    with c3: kpi("Avg Return",     fpc(avg_ret_c), "closed calls only",            "pos" if avg_ret_c>=0 else "neg")
-    with c4: kpi("Active Analysts",str(n_analysts),f"of {len(ANALYST_ORDER)} total","info")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        kpi("Total Calls", fmt_int(total_c), f"on {selected}")
+    with c2:
+        tone = "pos" if (wr_c is not None and wr_c >= 50) else "neg" if wr_c is not None else "dim"
+        kpi("Win Rate",
+            (f"{wr_c:.1f}%" if wr_c is not None else EM_DASH),
+            f"{wins_c}/{closed_c} closed", tone)
+    with c3:
+        kpi("Avg Return", fmt_pct(avg_ret_c), "closed calls",
+            tone_from_num(avg_ret_c))
+    with c4:
+        kpi("Active Analysts", fmt_int(n_analysts),
+            f"of {len(ANALYST_ORDER)} total")
 
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── Price sparkline | Best analysts ────────────────────────────────────
+    # Price sparkline | Best analysts
     col_spark, col_analysts = st.columns([2, 1])
 
     with col_spark:
         sec(f"{selected} — 7-Day Price")
         spark = fetch_sparkline(selected, days=7)
-        if spark:
-            line_c = "#00ff88" if spark[-1] >= spark[0] else "#ff4757"
-            fill_c = "rgba(0,255,136,.07)" if spark[-1] >= spark[0] else "rgba(255,71,87,.07)"
+        if spark and len(spark) >= 2:
+            up = spark[-1] >= spark[0]
+            line_c = C_POS if up else C_NEG
+            fill_c = "rgba(16,185,129,.08)" if up else "rgba(239,68,68,.08)"
             fig_sp = go.Figure(go.Scatter(
                 x=list(range(len(spark))), y=spark,
                 mode="lines", fill="tozeroy",
-                fillcolor=fill_c, line=dict(color=line_c, width=2),
+                fillcolor=fill_c, line=dict(color=line_c, width=1.8),
             ))
-            # Overlay open rec entry prices
-            for _, r in coin_recs[coin_recs["status"]=="OPEN"].iterrows():
-                if r.get("entry_price"):
+            # Open-position entry overlays
+            for _, r in coin_recs[coin_recs["status"] == "OPEN"].iterrows():
+                entry_v = num(r.get("entry_price"))
+                if entry_v is not None:
                     fig_sp.add_hline(
-                        y=r["entry_price"],
-                        line_dash="dot", line_width=1,
-                        line_color=ANALYST_COLORS.get(r["analyst"],"#58a6ff"),
-                        annotation_text=f"{r['analyst']} entry",
-                        annotation_font_color=ANALYST_COLORS.get(r["analyst"],"#58a6ff"),
+                        y=entry_v, line_dash="dot", line_width=1,
+                        line_color=ANALYST_COLORS.get(r["analyst"], C_ACC),
+                        annotation_text=f"{r['analyst']}",
+                        annotation_font_color=ANALYST_COLORS.get(r["analyst"], C_ACC),
                         annotation_font_size=9,
                     )
-            fig_sp.update_layout(**ply(height=250, showlegend=False,
-                                      xaxis=dict(visible=False),
-                                      yaxis=dict(title="USD",**_PL["yaxis"])))
-            st.plotly_chart(fig_sp, use_container_width=True, config={"displayModeBar": False})
+            fig_sp.update_layout(**ply(
+                height=260, showlegend=False,
+                xaxis=dict(visible=False),
+                yaxis=dict(title="USD", gridcolor=C_GRID, zerolinecolor=C_GRID,
+                           linecolor=C_AXIS, tickfont=_PLOT_MONO),
+            ))
+            st.plotly_chart(fig_sp, use_container_width=True,
+                            config={"displayModeBar": False})
         else:
-            st.info(f"Price data unavailable for {selected}.")
+            empty(f"Price data unavailable for {selected}")
 
     with col_analysts:
-        sec("Best Analysts for this Coin")
+        sec("Best Analysts")
         if not coin_close.empty:
             pa = (
-                coin_close.groupby("analyst")["outcome_pct"]
-                .agg(["mean","count"]).reset_index()
-                .rename(columns={"mean":"Avg %","count":"Calls"})
+                coin_close.dropna(subset=["outcome_pct"])
+                .groupby("analyst")["outcome_pct"]
+                .agg(["mean", "count"]).reset_index()
+                .rename(columns={"mean": "Avg %", "count": "Calls"})
                 .sort_values("Avg %", ascending=True)
             )
-            pa["Avg %"] = pa["Avg %"].round(2)
-            fig_ab = go.Figure(go.Bar(
-                x=pa["Avg %"], y=pa["analyst"], orientation="h",
-                marker_color=["#00ff88" if v>=0 else "#ff4757" for v in pa["Avg %"]],
-                text=[fpc(v) for v in pa["Avg %"]], textposition="outside",
-            ))
-            fig_ab.add_vline(x=0, line_color="#30363d", line_width=1)
-            fig_ab.update_layout(**ply(height=250, showlegend=False,
-                                      xaxis=dict(title="Avg Return %",**_PL["xaxis"])))
-            st.plotly_chart(fig_ab, use_container_width=True, config={"displayModeBar": False})
+            if pa.empty:
+                empty("No closed calls yet")
+            else:
+                pa["Avg %"] = pa["Avg %"].round(2)
+                colors = [C_POS if v >= 0 else C_NEG for v in pa["Avg %"]]
+                fig_ab = go.Figure(go.Bar(
+                    x=pa["Avg %"], y=pa["analyst"], orientation="h",
+                    marker_color=colors,
+                    text=[fmt_pct(v) for v in pa["Avg %"]],
+                    textposition="outside",
+                    textfont=dict(size=10, color=C_TEXT),
+                ))
+                fig_ab.add_vline(x=0, line_color=C_AXIS, line_width=1)
+                fig_ab.update_layout(**ply(
+                    height=260, showlegend=False,
+                    xaxis=dict(title="Avg Return %", gridcolor=C_GRID,
+                               zerolinecolor=C_GRID, linecolor=C_AXIS,
+                               tickfont=_PLOT_MONO),
+                ))
+                st.plotly_chart(fig_ab, use_container_width=True,
+                                config={"displayModeBar": False})
         else:
-            st.info("No closed calls on this coin yet.")
+            empty("No closed calls on this coin yet")
 
-    # ── Agreement scatter ──────────────────────────────────────────────────
-    sec("Analyst Agreement vs Outcome")
+    # Agreement scatter
+    sec("Daily Analyst Agreement vs Outcome")
     if not coin_close.empty and closed_c >= 3:
         cc = coin_close.copy()
         cc["date"] = cc["timestamp"].dt.date
-        ag_rows = []
+        ag_rows: List[Dict[str, Any]] = []
         for date, grp in cc.groupby("date"):
-            top = grp["recommendation"].mode()[0]
+            if grp["recommendation"].dropna().empty:
+                continue
+            top = grp["recommendation"].mode().iloc[0]
             pct_agree = (grp["recommendation"] == top).mean() * 100
+            avg_out = num(grp["outcome_pct"].dropna().mean())
             ag_rows.append({
-                "Date": date,
+                "Date":          date,
                 "Top Direction": top,
-                "Agreement %": round(pct_agree),
-                "Avg Outcome %": round(float(grp["outcome_pct"].dropna().mean()), 2) if grp["outcome_pct"].notna().any() else 0.0,
-                "# Analysts": len(grp),
+                "Agreement %":   round(pct_agree),
+                "Avg Outcome %": round(avg_out, 2) if avg_out is not None else 0.0,
+                "# Analysts":    int(len(grp)),
             })
         if ag_rows:
             ag_df = pd.DataFrame(ag_rows)
-            fig_ag = px.scatter(ag_df, x="Agreement %", y="Avg Outcome %",
-                                color="Top Direction",
-                                color_discrete_map={"LONG":"#00ff88","SHORT":"#ff4757","WATCH":"#ffd700"},
-                                size="# Analysts", hover_data=["Date"])
-            fig_ag.add_hline(y=0, line_color="#30363d", line_width=1)
-            fig_ag.add_vline(x=60, line_dash="dash", line_color="#484f58", line_width=1)
+            fig_ag = px.scatter(
+                ag_df, x="Agreement %", y="Avg Outcome %",
+                color="Top Direction",
+                color_discrete_map={"LONG": C_POS, "SHORT": C_NEG, "WATCH": C_WARN},
+                size="# Analysts", hover_data=["Date"],
+            )
+            fig_ag.add_hline(y=0, line_color=C_AXIS, line_width=1)
+            fig_ag.add_vline(x=60, line_dash="dash", line_color=C_AXIS, line_width=1)
             fig_ag.update_layout(**ply(height=270))
-            st.plotly_chart(fig_ag, use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(fig_ag, use_container_width=True,
+                            config={"displayModeBar": False})
         else:
-            st.info("Not enough daily groupings for agreement analysis.")
+            empty("Not enough daily groupings for agreement analysis")
     else:
-        st.info(f"Need more closed {selected} calls for agreement analysis (currently {closed_c}).")
+        empty(f"Need ≥3 closed {selected} calls (currently {closed_c})")
 
-    # ── Full rec table ─────────────────────────────────────────────────────
+    # Full table
     sec(f"All {selected} Recommendations")
-    disp = coin_recs[[
-        "timestamp","analyst","recommendation","entry_price",
-        "target_price","stop_loss","confidence","status","outcome_pct","thesis"
-    ]].copy()
-    disp["timestamp"]   = disp["timestamp"].dt.strftime("%Y-%m-%d")
-    disp["outcome_pct"] = disp["outcome_pct"].apply(lambda x: fpc(x) if x is not None else "OPEN")
-    disp["thesis"]      = disp["thesis"].apply(lambda x: str(x)[:100]+"…" if x and len(str(x))>100 else (x or "—"))
-    for col in ["entry_price","target_price","stop_loss"]:
-        disp[col] = disp[col].apply(fp)
-    disp.columns = ["Date","Analyst","Direction","Entry","Target","Stop","Conf","Status","Return %","Thesis"]
-    st.dataframe(disp, use_container_width=True, hide_index=True)
+    disp = pd.DataFrame({
+        "Date":       [fmt_ts(t, "%Y-%m-%d") for t in coin_recs["timestamp"]],
+        "Analyst":    [fmt_text(a) for a in coin_recs["analyst"]],
+        "Direction":  [fmt_text(d) for d in coin_recs["recommendation"]],
+        "Entry":      [fmt_price(v) for v in coin_recs["entry_price"]],
+        "Target":     [fmt_price(v) for v in coin_recs["target_price"]],
+        "Stop":       [fmt_price(v) for v in coin_recs["stop_loss"]],
+        "Conf":       [fmt_conf(c) for c in coin_recs["confidence"]],
+        "Status":     [fmt_text(s, fallback="") for s in coin_recs["status"]],
+        "Return":     [(fmt_pct(v) if present(v) else "OPEN")
+                       for v in coin_recs["outcome_pct"]],
+        "Thesis":     [fmt_text(t, fallback=EM_DASH, max_len=100)
+                       for t in coin_recs["thesis"]],
+    })
+    st.dataframe(
+        disp.style.apply(color_pnl_column, subset=["Return"]),
+        use_container_width=True, hide_index=True,
+    )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # PAGE 7 — LOOKBACK INSIGHTS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
-def _fmt_ts(val, fmt: str = "%Y-%m-%d %H:%M UTC") -> str:
-    """Safely format a timestamp-like value, handling NaT/None/strings."""
-    if val is None or pd.isna(val):
-        return "—"
-    try:
-        return val.strftime(fmt)
-    except (ValueError, AttributeError, TypeError):
-        pass
-    try:
-        return pd.to_datetime(val, utc=True).strftime(fmt)
-    except Exception:
-        s = str(val)
-        return s[: len(fmt)] if s else "—"
-
-
-def page_lookback():
+def page_lookback() -> None:
     page_title("brain", "Lookback Insights",
-               "Post-mortems generated from closed calls, persisted as analyst memory")
+               "Post-mortems from closed calls, persisted as analyst memory")
 
     st.markdown(
-        "<div style='font-size:.82rem;color:var(--muted);margin:-.4rem 0 1.1rem'>"
-        "Reports summarize lessons from closed positions and are injected into future prompts. "
-        "Generate new ones with <code>/lookback BTC 30</code> in the terminal chat."
-        "</div>",
+        '<div style="font-size:.82rem;color:var(--muted);'
+        'margin:-.2rem 0 1.25rem;line-height:1.6">'
+        'Reports summarize lessons from closed positions and are injected into '
+        'future prompts. Generate new ones with <code>/lookback BTC 30</code> '
+        'in the terminal chat.'
+        '</div>',
         unsafe_allow_html=True,
     )
 
     mems = load_lookbacks()
     if mems.empty:
-        st.info("No lookback reports yet. Run `/lookback BTC 30` in the analyst chat to create one.")
+        empty("No lookback reports yet",
+              "Run /lookback SYMBOL DAYS in the analyst chat to create one.")
         return
 
-    coins = sorted(mems["symbol"].unique().tolist())
+    coins = sorted(mems["symbol"].dropna().unique().tolist())
     sel_c = st.multiselect("Filter by coin", coins, key="lb_filter")
     if sel_c:
         mems = mems[mems["symbol"].isin(sel_c)]
 
+    if mems.empty:
+        empty("No reports match your filter")
+        return
+
     st.markdown(
-        f"<div style='font-size:.72rem;color:var(--muted);margin-bottom:.7rem;"
-        f"letter-spacing:.06em'>{len(mems)} REPORT{'S' if len(mems) != 1 else ''}</div>",
+        f'<div style="font-size:.68rem;color:var(--muted);margin-bottom:.85rem;'
+        f'letter-spacing:.08em;font-weight:500;text-transform:uppercase">'
+        f'{len(mems)} report{"s" if len(mems) != 1 else ""}</div>',
         unsafe_allow_html=True,
     )
 
     for _, row in mems.iterrows():
-        ts_str = _fmt_ts(row["generated_at"])
-        sym    = row["symbol"]
-        days   = row["days"]
-        label  = f"{sym}  ·  {days}-day lookback  ·  {ts_str}"
+        sym = fmt_text(row.get("symbol"), fallback="?")
+        days = num(row.get("days"))
+        days_str = f"{int(days)}-day" if days is not None else "—"
+        ts_str = fmt_ts(row.get("generated_at"), "%Y-%m-%d %H:%M UTC")
+        label = f"{sym}  ·  {days_str} lookback  ·  {ts_str}"
+        summary = fmt_text(row.get("summary"), fallback="(empty report)")
         with st.expander(label, expanded=False):
-            summary = str(row["summary"]) if row["summary"] is not None else ""
+            # Escape HTML chars minimally (preserve pre-formatted text)
+            safe = (summary.replace("&", "&amp;")
+                           .replace("<", "&lt;")
+                           .replace(">", "&gt;"))
             st.markdown(
-                f'<div style="background:var(--card);border:1px solid var(--border);'
-                f'border-radius:10px;padding:1rem 1.2rem;font-size:.86rem;line-height:1.75;'
-                f'color:var(--text);white-space:pre-wrap">{summary}</div>',
+                f'<div style="font-size:.85rem;line-height:1.75;'
+                f'color:var(--text-2);white-space:pre-wrap;'
+                f'font-family:var(--font-sans)">{safe}</div>',
                 unsafe_allow_html=True,
             )
 
-    # Coverage table
-    if not mems.empty:
-        sec("Coverage")
-        cov = (
-            mems.groupby("symbol")
-            .agg(Reports=("summary","count"), Latest=("generated_at","max"), Max_Days=("days","max"))
+    sec("Coverage")
+    cov = (
+        mems.groupby("symbol")
+            .agg(Reports=("summary", "count"),
+                 Latest=("generated_at", "max"),
+                 Max_Days=("days", "max"))
             .reset_index()
-        )
-        cov["Latest"] = cov["Latest"].apply(lambda x: _fmt_ts(x, "%Y-%m-%d"))
-        st.dataframe(cov, use_container_width=True, hide_index=True)
+            .rename(columns={"symbol": "Coin"})
+    )
+    cov["Latest"] = cov["Latest"].apply(lambda v: fmt_ts(v, "%Y-%m-%d"))
+    cov["Reports"] = cov["Reports"].apply(fmt_int)
+    cov["Max_Days"] = cov["Max_Days"].apply(lambda v: f"{int(v)}d" if num(v) is not None else EM_DASH)
+    cov = cov.rename(columns={"Max_Days": "Max Days"})
+    st.dataframe(cov, use_container_width=True, hide_index=True)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # MAIN
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
-def main():
+def main() -> None:
     page = sidebar()
 
     dispatch = {
-        "Overview":         page_overview,
-        "Leaderboard":      page_leaderboard,
-        "Active Positions": page_active,
-        "Performance":      page_performance,
-        "History":          page_history,
-        "Coin Analysis":    page_coin,
-        "Lookback Insights":page_lookback,
+        "Overview":          page_overview,
+        "Leaderboard":       page_leaderboard,
+        "Active Positions":  page_active,
+        "Performance":       page_performance,
+        "History":           page_history,
+        "Coin Analysis":     page_coin,
+        "Lookback Insights": page_lookback,
     }
     dispatch.get(page, page_overview)()
 
     # Footer
-    st.markdown("<br>", unsafe_allow_html=True)
-    shield = _icon("shield", 11, "var(--dim)")
     st.markdown(
-        f"<div style='text-align:center;font-size:.64rem;color:var(--dim);"
-        f"border-top:1px solid var(--border);padding-top:1rem;margin-top:1.5rem;"
-        f"letter-spacing:.05em;font-weight:500'>"
-        f"<span style='display:inline-flex;align-items:center;gap:.4rem'>"
-        f"{shield}Research-only · not financial advice</span>"
-        f"<span style='margin:0 .9rem;color:var(--border2)'>|</span>"
-        f"<span>Sources: CoinGecko · Binance · Deribit · DeFiLlama · Alternative.me</span>"
-        f"</div>",
+        '<div class="site-foot">'
+        '<span>Research only · not financial advice</span>'
+        '<span style="margin:0 .75rem;color:var(--border-2)">·</span>'
+        '<span>CoinGecko · Binance · Deribit · DeFiLlama · Alternative.me</span>'
+        '</div>',
         unsafe_allow_html=True,
     )
 

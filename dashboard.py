@@ -117,6 +117,35 @@ def _icon(name: str, size: int = 16, color: str = "currentColor", stroke: float 
             f'<path d="M4 18 10 10 14 14 22 4" stroke-linecap="round" stroke-linejoin="round"/>'
             f'<circle cx="22" cy="4" r="1.5" fill="{color}" stroke="none"/>'
             f'<line x1="3" y1="21" x2="21" y2="21" stroke-linecap="round"/>',
+        "chevron-right":
+            f'<polyline points="9 18 15 12 9 6"/>',
+        "chevron-left":
+            f'<polyline points="15 18 9 12 15 6"/>',
+        "chevron-down":
+            f'<polyline points="6 9 12 15 18 9"/>',
+        "chevron-up":
+            f'<polyline points="18 15 12 9 6 15"/>',
+        "close":
+            f'<line x1="6" y1="6" x2="18" y2="18"/>'
+            f'<line x1="18" y1="6" x2="6" y2="18"/>',
+        "calendar":
+            f'<rect x="3" y="4" width="18" height="18" rx="2"/>'
+            f'<path d="M7 2v4M17 2v4M3 10h18"/>',
+        "search":
+            f'<circle cx="11" cy="11" r="7"/>'
+            f'<path d="M20 20l-4.35-4.35"/>',
+        "external-link":
+            f'<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h6"/>'
+            f'<polyline points="15 3 21 3 21 9"/>',
+        "circle-check":
+            f'<circle cx="12" cy="12" r="9"/>'
+            f'<polyline points="8 12 11 15 16 9"/>',
+        "circle-x":
+            f'<circle cx="12" cy="12" r="9"/>'
+            f'<line x1="8" y1="8" x2="16" y2="16"/>'
+            f'<line x1="16" y1="8" x2="8" y2="16"/>',
+        "activity":
+            f'<polyline points="3 12 6 8 10 16 14 8 18 12 21 12"/>',
     }
     body = paths.get(name, paths["dot"])
     return (
@@ -221,6 +250,51 @@ section[data-testid="stSidebar"] * { color: var(--text); }
 /* Sidebar nav items — custom list */
 .nav-list { display: flex; flex-direction: column; gap: 2px; margin-top: .4rem; }
 
+/* Sidebar collapse button — restyle Streamlit chevron */
+[data-testid="stSidebarCollapseButton"] {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 32px !important;
+    height: 32px !important;
+    border-radius: 6px !important;
+    transition: all 0.2s ease !important;
+    background: transparent !important;
+    border: 1px solid var(--border) !important;
+}
+[data-testid="stSidebarCollapseButton"]:hover {
+    background: rgba(56,208,255,.08) !important;
+    border-color: var(--cyan) !important;
+}
+[data-testid="stSidebarCollapseButton"] svg {
+    width: 16px !important;
+    height: 16px !important;
+    stroke: var(--cyan) !important;
+    stroke-width: 2.5 !important;
+    stroke-linecap: round !important;
+    stroke-linejoin: round !important;
+}
+
+/* Sidebar collapsed expand button */
+[data-testid="stSidebarCollapsedControl"] {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+[data-testid="stSidebarCollapsedControl"] button {
+    border-radius: 6px !important;
+    background: var(--card) !important;
+    border: 1px solid var(--border) !important;
+}
+[data-testid="stSidebarCollapsedControl"] button:hover {
+    background: rgba(56,208,255,.08) !important;
+    border-color: var(--cyan) !important;
+}
+[data-testid="stSidebarCollapsedControl"] svg {
+    stroke: var(--cyan) !important;
+    stroke-width: 2.5 !important;
+}
+
 /* Page header */
 .page-head {
     display: flex; align-items: center; gap: .85rem;
@@ -305,6 +379,51 @@ section[data-testid="stSidebar"] * { color: var(--text); }
     letter-spacing: .02em;
 }
 
+/* Status pills (for LONG/SHORT) */
+.pill-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    font-family: var(--font-mono);
+}
+.pill-status.long {
+    background: rgba(0,227,137,.15);
+    color: var(--green);
+    border: 1px solid rgba(0,227,137,.3);
+}
+.pill-status.short {
+    background: rgba(255,84,112,.15);
+    color: var(--red);
+    border: 1px solid rgba(255,84,112,.3);
+}
+.pill-status.watch {
+    background: rgba(255,200,87,.15);
+    color: var(--yellow);
+    border: 1px solid rgba(255,200,87,.3);
+}
+
+/* Rank pills (numbered) */
+.pill-rank {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 28px;
+    height: 28px;
+    padding: 0 6px;
+    border-radius: 6px;
+    background: linear-gradient(135deg, rgba(56,208,255,.15), rgba(0,227,137,.08));
+    border: 1px solid var(--border2);
+    font-weight: 700;
+    font-size: 0.75rem;
+    color: var(--cyan);
+    font-family: var(--font-mono);
+}
+
 /* Section headers */
 .sec-hdr {
     font-size: 0.64rem;
@@ -350,6 +469,11 @@ div[data-testid="stExpander"]    { border: 1px solid var(--border); border-radiu
 div[data-testid="stExpander"] summary { color: var(--text) !important; font-weight: 500;
                                          padding: .6rem .9rem !important; }
 div[data-testid="stExpander"] summary:hover { color: var(--cyan) !important; }
+/* Restyle expander arrow */
+div[data-testid="stExpander"] summary svg {
+    stroke: var(--cyan) !important;
+    stroke-width: 2.5 !important;
+}
 
 /* ── Dataframe / Table — full dark theme ── */
 div[data-testid="stDataFrame"]   { border: 1px solid var(--border); border-radius: 6px;
@@ -389,10 +513,11 @@ div[data-testid="stTable"] td    { background: var(--card) !important;
 /* ── Top toolbar / header bar ── */
 header[data-testid="stHeader"]   { background: var(--bg) !important;
                                    border-bottom: 1px solid var(--border) !important; }
-div[data-testid="stToolbar"]     { background: transparent !important; }
+div[data-testid="stToolbar"]     { background: transparent !important; display: none !important; }
 div[data-testid="stDecoration"]  { background: transparent !important; display: none !important; }
 div[data-testid="stStatusWidget"]{ background: var(--card) !important;
                                    color: var(--text) !important; }
+div[data-testid="stDeployButton"]{ display: none !important; }
 
 /* ── Sidebar Radio buttons — styled as nav items ── */
 section[data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] {
@@ -464,6 +589,7 @@ div[data-baseweb="select"] > div { background: var(--card) !important;
                                    border-color: var(--border) !important;
                                    color: var(--text) !important; }
 div[data-baseweb="select"] span  { color: var(--text) !important; }
+div[data-baseweb="select"] svg   { stroke: var(--cyan) !important; stroke-width: 2.5 !important; }
 [data-baseweb="popover"] ul      { background: var(--card) !important;
                                    border: 1px solid var(--border) !important; }
 [data-baseweb="popover"] li      { color: var(--text) !important; }
@@ -473,6 +599,11 @@ div[data-baseweb="select"] span  { color: var(--text) !important; }
 [data-baseweb="tag"]             { background: var(--card2) !important;
                                    border-color: var(--border) !important;
                                    color: var(--text) !important; }
+[data-baseweb="tag"] svg         { stroke: var(--muted) !important; stroke-width: 2.5 !important; }
+[data-baseweb="tag"] svg:hover   { stroke: var(--text) !important; }
+
+/* ── Date input ── */
+div[data-baseweb="input"] svg    { stroke: var(--cyan) !important; stroke-width: 2 !important; }
 
 /* ── Checkbox ── */
 div[data-testid="stCheckbox"] label span { color: var(--text) !important; }

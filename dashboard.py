@@ -865,19 +865,34 @@ def fetch_fg() -> Dict[str, Any]:
 
 @st.cache_data(ttl=60)
 def fetch_prices(symbols: tuple) -> Dict[str, float]:
+    """Fetch live USD prices — tries CoinGecko first, then Coinbase as fallback."""
     if not symbols:
         return {}
+
+    result: Dict[str, float] = {}
+
+    # ── Primary: CoinGecko batch endpoint ──────────────────────────────────
     ids = ",".join(CG_ID.get(s.upper(), s.lower()) for s in symbols)
     data = _get(f"{COINGECKO_BASE}/simple/price",
                 {"ids": ids, "vs_currencies": "usd"})
-    if not data:
-        return {}
-    result: Dict[str, float] = {}
-    for sym in symbols:
-        cg_id = CG_ID.get(sym.upper(), sym.lower())
-        price = (data.get(cg_id) or {}).get("usd")
-        if price is not None:
-            result[sym.upper()] = float(price)
+    if data:
+        for sym in symbols:
+            cg_id = CG_ID.get(sym.upper(), sym.lower())
+            price = (data.get(cg_id) or {}).get("usd")
+            if price is not None:
+                result[sym.upper()] = float(price)
+
+    # ── Fallback: Coinbase v2 spot (free, no auth) for any missing symbols ─
+    missing = [s for s in symbols if s.upper() not in result]
+    if missing:
+        for sym in missing:
+            cb = _get(f"https://api.coinbase.com/v2/prices/{sym.upper()}-USD/spot")
+            if cb and "data" in cb:
+                try:
+                    result[sym.upper()] = float(cb["data"]["amount"])
+                except (KeyError, ValueError, TypeError):
+                    pass
+
     return result
 
 
@@ -1571,9 +1586,10 @@ def page_active() -> None:
     prices = fetch_prices(syms)
 
     if not prices:
-        st.warning("⚠ Live prices unavailable — CoinGecko may be rate-limited. "
-                   "Current price, unrealized P&L, and distance-to-target/stop "
-                   "columns will show — until the next refresh.")
+        st.warning("Live prices unavailable — both CoinGecko and Coinbase "
+                   "returned errors (rate limit or timeout). Current price, "
+                   "unrealized P&L, and distance columns will be empty until "
+                   "the next successful refresh.")
 
     rows: List[Dict[str, Any]] = []
     for _, rec in open_recs.iterrows():

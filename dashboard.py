@@ -93,6 +93,43 @@ def _hash_pw(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
 
+def _ensure_login_log_table() -> None:
+    """Create the login_log table if it doesn't exist."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.execute("""CREATE TABLE IF NOT EXISTS login_log (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT    NOT NULL,
+            username  TEXT    NOT NULL,
+            success   INTEGER NOT NULL,  -- 1 = success, 0 = failure
+            reason    TEXT               -- 'ok', 'bad_password', 'unknown_user'
+        )""")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # non-critical — don't block the app
+
+
+def _log_login(username: str, success: bool, reason: str = "ok") -> None:
+    """Record a login attempt to both stdout (Streamlit Cloud logs) and the DB."""
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    status = "SUCCESS" if success else "FAILED"
+    print(f"[LOGIN] {ts} | {status} | user={username} | reason={reason}")
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.execute(
+            "INSERT INTO login_log (timestamp, username, success, reason) VALUES (?,?,?,?)",
+            (ts, username, int(success), reason),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # non-critical
+
+
+_ensure_login_log_table()
+
+
 def _check_credentials() -> bool:
     """Show a login form and return True if the user is authenticated."""
     if st.session_state.get("authenticated"):
@@ -132,12 +169,15 @@ def _check_credentials() -> bool:
                     match = hmac.compare_digest(stored, password)
 
                 if match:
+                    _log_login(username, True)
                     st.session_state["authenticated"] = True
                     st.session_state["user"] = username
                     st.rerun()
                 else:
+                    _log_login(username, False, "bad_password")
                     st.error("Incorrect password.")
             else:
+                _log_login(username, False, "unknown_user")
                 st.error("Unknown username.")
     st.stop()
     return False
@@ -1192,6 +1232,7 @@ NAV_ITEMS = [
     ("Coin Analysis",     "hex"),
     ("Lookback Insights", "brain"),
     ("Analysis Reports",  "list"),
+    ("Login History",     "shield"),
 ]
 
 
@@ -2497,6 +2538,70 @@ def page_reports() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# LOGIN HISTORY PAGE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def page_login_history() -> None:
+    sec = lambda t: st.markdown(
+        f'<h3 style="font-size:.95rem;font-weight:600;letter-spacing:.04em;'
+        f'margin:1.6rem 0 .6rem">{t}</h3>', unsafe_allow_html=True)
+
+    sec("Login History")
+
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        df = pd.read_sql_query(
+            "SELECT timestamp, username, success, reason FROM login_log "
+            "ORDER BY timestamp DESC LIMIT 200", conn)
+        conn.close()
+    except Exception:
+        df = pd.DataFrame()
+
+    if df.empty:
+        st.info("No login attempts recorded yet.")
+        return
+
+    # Summary stats
+    total = len(df)
+    successes = int(df["success"].sum())
+    failures = total - successes
+    unique_users = df.loc[df["success"] == 1, "username"].nunique()
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Total Logins", total)
+    with c2:
+        st.metric("Successful", successes)
+    with c3:
+        st.metric("Failed", failures)
+    with c4:
+        st.metric("Unique Users", unique_users)
+
+    st.markdown("---")
+
+    # Format for display
+    disp = df.copy()
+    disp["status"] = disp["success"].map({1: "OK", 0: "FAILED"})
+    disp["timestamp"] = pd.to_datetime(disp["timestamp"], utc=True, errors="coerce")
+    disp["time"] = disp["timestamp"].dt.strftime("%Y-%m-%d %H:%M UTC")
+    disp = disp[["time", "username", "status", "reason"]]
+    disp.columns = ["Time", "User", "Status", "Reason"]
+
+    # Color failed rows
+    def _style_row(row):
+        if row["Status"] == "FAILED":
+            return ["color: #ef4444"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(
+        disp.style.apply(_style_row, axis=1),
+        use_container_width=True,
+        hide_index=True,
+        height=min(len(disp) * 38 + 40, 600),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2513,6 +2618,7 @@ def main() -> None:
         "Coin Analysis":     page_coin,
         "Lookback Insights": page_lookback,
         "Analysis Reports":  page_reports,
+        "Login History":     page_login_history,
     }
     dispatch.get(page, page_overview)()
 

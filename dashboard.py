@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import base64
 import functools
+import hashlib
+import hmac
 import json
 import sqlite3
 import time
@@ -81,6 +83,65 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AUTHENTICATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _hash_pw(password: str) -> str:
+    """SHA-256 hex digest of a password string."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def _check_credentials() -> bool:
+    """Show a login form and return True if the user is authenticated."""
+    if st.session_state.get("authenticated"):
+        return True
+
+    # Credentials live in .streamlit/secrets.toml → [credentials.usernames]
+    try:
+        creds = st.secrets["credentials"]["usernames"]
+    except (KeyError, FileNotFoundError):
+        st.error("⚠ Authentication not configured — add `[credentials.usernames]` to Streamlit secrets.")
+        st.stop()
+        return False
+
+    # Centred, minimal login form
+    st.markdown(
+        '<div style="max-width:380px;margin:8rem auto 0 auto;">'
+        '<h2 style="text-align:center;margin-bottom:0.2rem;">Crypto Analyst Team</h2>'
+        '<p style="text-align:center;color:#71717a;margin-bottom:2rem;">Sign in to continue</p>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    col1, col2, col3 = st.columns([1, 1.2, 1])
+    with col2:
+        with st.form("login_form"):
+            username = st.text_input("Username").strip().lower()
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Sign in", use_container_width=True)
+
+        if submitted:
+            if username in creds:
+                stored = creds[username]
+                # Support both plain-text and hashed (sha256:...) passwords
+                if stored.startswith("sha256:"):
+                    expected = stored[7:]
+                    match = hmac.compare_digest(expected, _hash_pw(password))
+                else:
+                    match = hmac.compare_digest(stored, password)
+
+                if match:
+                    st.session_state["authenticated"] = True
+                    st.session_state["user"] = username
+                    st.rerun()
+                else:
+                    st.error("Incorrect password.")
+            else:
+                st.error("Unknown username.")
+    st.stop()
+    return False
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ICON SYSTEM
@@ -1191,6 +1252,15 @@ def sidebar() -> str:
         if elapsed >= AUTO_REFRESH_SEC:
             st.cache_data.clear()
             st.session_state["last_refresh"] = time.time()
+            st.rerun()
+
+        # User / logout
+        st.markdown('<hr class="divider"/>', unsafe_allow_html=True)
+        user = st.session_state.get("user", "")
+        st.caption(f"Signed in as **{user}**")
+        if st.button("Sign out", use_container_width=True, key="logout"):
+            st.session_state["authenticated"] = False
+            st.session_state.pop("user", None)
             st.rerun()
 
     return st.session_state["page"]
@@ -2431,6 +2501,7 @@ def page_reports() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
+    _check_credentials()
     page = sidebar()
 
     dispatch = {

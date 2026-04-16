@@ -2291,13 +2291,24 @@ def page_reports() -> None:
               "analysis runs. Check back after the next cycle.")
         return
 
-    # Parse JSON columns for display
+    # Parse JSON columns for display — values may already be dicts/lists
+    # if pandas inferred types, or strings that need json.loads().
+    def _parse_json(v, fallback):
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return fallback
+        if isinstance(v, (dict, list)):
+            return v
+        try:
+            return json.loads(str(v))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return fallback
+
     reports["_coins"] = reports["coins"].apply(
-        lambda v: ", ".join(json.loads(v)) if v else "")
+        lambda v: ", ".join(_parse_json(v, [])) if v else "")
     reports["_tags"] = reports["tags"].apply(
-        lambda v: json.loads(v) if v else [])
+        lambda v: _parse_json(v, []))
     reports["_prices"] = reports["prices"].apply(
-        lambda v: json.loads(v) if v else {})
+        lambda v: _parse_json(v, {}))
 
     # ── KPIs ───────────────────────────────────────────────────────────────
     total = len(reports)

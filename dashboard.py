@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import functools
+import json
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -1129,6 +1130,7 @@ NAV_ITEMS = [
     ("History",           "list"),
     ("Coin Analysis",     "hex"),
     ("Lookback Insights", "brain"),
+    ("Analysis Reports",  "list"),
 ]
 
 
@@ -2269,6 +2271,133 @@ def page_lookback() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PAGE 8 — ANALYSIS HISTORY
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@st.cache_data(ttl=30)
+def load_reports() -> pd.DataFrame:
+    return qdf("SELECT * FROM analysis_reports ORDER BY timestamp DESC")
+
+
+def page_reports() -> None:
+    page_title("list", "Analysis History",
+               "Full 4-hour analysis reports from every scheduled run")
+
+    reports = load_reports()
+    if reports.empty:
+        empty("No analysis reports yet",
+              "Reports are saved automatically each time the 4h scheduled "
+              "analysis runs. Check back after the next cycle.")
+        return
+
+    # Parse JSON columns for display
+    reports["_coins"] = reports["coins"].apply(
+        lambda v: ", ".join(json.loads(v)) if v else "")
+    reports["_tags"] = reports["tags"].apply(
+        lambda v: json.loads(v) if v else [])
+    reports["_prices"] = reports["prices"].apply(
+        lambda v: json.loads(v) if v else {})
+
+    # ── KPIs ───────────────────────────────────────────────────────────────
+    total = len(reports)
+    latest_ts = reports["timestamp"].iloc[0] if total else None
+    latest_ts_str = fmt_ts(pd.to_datetime(latest_ts, utc=True, errors="coerce"),
+                           "%Y-%m-%d %H:%M UTC") if latest_ts else EM_DASH
+    avg_signals = reports["signals_count"].mean() if total else 0
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        kpi("Total Reports", fmt_int(total), "since tracking started")
+    with c2:
+        kpi("Latest Run", latest_ts_str, reports["run_id"].iloc[0] if total else "")
+    with c3:
+        kpi("Avg Signals / Run", f"{avg_signals:.0f}", "LONG + SHORT persisted")
+
+    # ── Report list ────────────────────────────────────────────────────────
+    sec("Browse Reports")
+
+    # Filter by coin
+    all_coins_raw = set()
+    for c_list in reports["_coins"]:
+        for c in c_list.split(", "):
+            if c.strip():
+                all_coins_raw.add(c.strip())
+    all_coins = sorted(all_coins_raw)
+    coin_filter = st.multiselect("Filter by coin", all_coins, key="rpt_coin")
+
+    if coin_filter:
+        mask = reports["_coins"].apply(
+            lambda v: any(c in v for c in coin_filter))
+        reports = reports[mask]
+
+    if reports.empty:
+        empty("No reports match your filter")
+        return
+
+    st.markdown(
+        f'<div style="font-size:.68rem;color:var(--muted);margin-bottom:.85rem;'
+        f'letter-spacing:.08em;font-weight:500;text-transform:uppercase">'
+        f'{len(reports)} report{"s" if len(reports) != 1 else ""}</div>',
+        unsafe_allow_html=True,
+    )
+
+    for _, row in reports.iterrows():
+        run_id = row.get("run_id", "?")
+        ts = pd.to_datetime(row.get("timestamp"), utc=True, errors="coerce")
+        ts_str = fmt_ts(ts, "%Y-%m-%d %H:%M UTC")
+        coins_str = row.get("_coins", "")
+        sigs = row.get("signals_count", 0)
+        fg = row.get("fear_greed")
+        fg_str = f" · F&G {int(fg)}" if fg is not None else ""
+        prices_dict = row.get("_prices", {})
+        tags_list = row.get("_tags", [])
+        source = row.get("source", "cowork")
+
+        # Price summary
+        price_parts = []
+        for sym in ("BTC", "ETH", "RPL", "SOL"):
+            p = prices_dict.get(sym)
+            if p is not None:
+                price_parts.append(f"{sym} ${p:,.2f}" if p > 10 else f"{sym} ${p:,.4f}")
+        price_str = " · ".join(price_parts) if price_parts else ""
+
+        # Tag badges
+        degraded = [t for t in tags_list
+                    if t not in ("cowork-fallback",)]
+        tag_str = ""
+        if degraded:
+            tag_str = " · " + ", ".join(degraded)
+
+        label = (f"**{ts_str}**  ·  {coins_str}  ·  "
+                 f"{sigs} signals{fg_str}{tag_str}")
+
+        with st.expander(label, expanded=False):
+            # Header row with metadata
+            mc1, mc2, mc3 = st.columns(3)
+            with mc1:
+                st.markdown(f"**Run ID:** `{run_id}`")
+            with mc2:
+                st.markdown(f"**Source:** {source}")
+            with mc3:
+                st.markdown(f"**Signals:** {sigs}")
+
+            if price_str:
+                st.markdown(f"**Prices:** {price_str}")
+
+            if degraded:
+                st.warning(f"Degraded data: {', '.join(degraded)}")
+
+            # Full analyst report
+            report_md = row.get("report_md", "")
+            if report_md:
+                st.markdown("---")
+                st.markdown(report_md, unsafe_allow_html=False)
+            else:
+                empty("Report content not available")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2283,6 +2412,7 @@ def main() -> None:
         "History":           page_history,
         "Coin Analysis":     page_coin,
         "Lookback Insights": page_lookback,
+        "Analysis Reports":  page_reports,
     }
     dispatch.get(page, page_overview)()
 

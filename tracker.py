@@ -80,6 +80,20 @@ def init_db() -> None:
                 generated_at TEXT NOT NULL,
                 summary      TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS analysis_reports (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id       TEXT    NOT NULL UNIQUE,   -- e.g. 20260416_0832Z
+                timestamp    TEXT    NOT NULL,           -- ISO-8601
+                coins        TEXT    NOT NULL,           -- JSON array e.g. ["BTC","ETH","RPL"]
+                prices       TEXT,                       -- JSON dict e.g. {"BTC":74697,...}
+                fear_greed   INTEGER,
+                signals_count INTEGER DEFAULT 0,
+                tags         TEXT,                       -- JSON array of data-quality flags
+                report_md    TEXT    NOT NULL,            -- full markdown analyst output
+                heartbeat    TEXT,                        -- JSON heartbeat log
+                source       TEXT    DEFAULT 'cowork'     -- 'cowork' or 'local'
+            );
             """
         )
         conn.commit()
@@ -352,6 +366,69 @@ def get_latest_lookback_memory(symbol: str) -> Optional[str]:
             (symbol.upper(),),
         ).fetchone()
         return row[0] if row else None
+
+
+# ─── Analysis Reports ────────────────────────────────────────────────────────
+
+
+def save_analysis_report(
+    run_id: str,
+    timestamp: str,
+    coins: List[str],
+    report_md: str,
+    prices: Optional[Dict[str, float]] = None,
+    fear_greed: Optional[int] = None,
+    signals_count: int = 0,
+    tags: Optional[List[str]] = None,
+    heartbeat: Optional[Dict[str, Any]] = None,
+    source: str = "cowork",
+) -> int:
+    """Persist a full analysis report and return its auto-generated ID."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT OR REPLACE INTO analysis_reports
+              (run_id, timestamp, coins, prices, fear_greed,
+               signals_count, tags, report_md, heartbeat, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                timestamp,
+                json.dumps(coins),
+                json.dumps(prices) if prices else None,
+                fear_greed,
+                signals_count,
+                json.dumps(tags or []),
+                report_md,
+                json.dumps(heartbeat) if heartbeat else None,
+                source,
+            ),
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_analysis_reports(limit: int = 100) -> List[Dict[str, Any]]:
+    """Return analysis reports, most recent first."""
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM analysis_reports ORDER BY timestamp DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_analysis_report(run_id: str) -> Optional[Dict[str, Any]]:
+    """Return a single analysis report by run_id."""
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM analysis_reports WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 # ─── Auto-close positions ─────────────────────────────────────────────────────

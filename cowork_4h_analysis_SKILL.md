@@ -352,6 +352,55 @@ log = {
 json.dump(log, open(f"{WORKSPACE}/cowork_runs/{RUN_ID}.json","w"), indent=2)
 ```
 
+## 9b. SAVE FULL REPORT TO DB
+
+Persist the full markdown report and heartbeat to `analysis_reports` so the
+dashboard's "Analysis History" page can display it. Use the project's
+`tracker.save_analysis_report()` or inline SQL:
+
+```python
+import sys, json, sqlite3
+sys.path.insert(0, WORKSPACE)
+try:
+    from tracker import save_analysis_report, init_db
+    init_db()
+    save_analysis_report(
+        run_id=RUN_ID,
+        timestamp=TS,
+        coins=["BTC","ETH","RPL"],
+        report_md=open(f"{WORKSPACE}/cowork_analysis_{RUN_ID}.md").read(),
+        prices={"BTC": BTC_PRICE, "ETH": ETH_PRICE, "RPL": RPL_PRICE},
+        fear_greed=FNG_VALUE,         # integer from §3
+        signals_count=len(signals),
+        tags=tags,
+        heartbeat=log,                # dict from §9
+        source="cowork",
+    )
+    print(f"Report saved to analysis_reports (run_id={RUN_ID})")
+except Exception as e:
+    print(f"save_analysis_report failed: {e}")
+    # Fallback: write directly to the fresh-clone DB in §8
+    try:
+        conn = sqlite3.connect(f"{SCRATCH}/push/recommendations.db", timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""CREATE TABLE IF NOT EXISTS analysis_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE,
+            timestamp TEXT NOT NULL, coins TEXT NOT NULL, prices TEXT,
+            fear_greed INTEGER, signals_count INTEGER DEFAULT 0, tags TEXT,
+            report_md TEXT NOT NULL, heartbeat TEXT, source TEXT DEFAULT 'cowork')""")
+        conn.execute(
+            "INSERT OR REPLACE INTO analysis_reports (run_id,timestamp,coins,prices,fear_greed,signals_count,tags,report_md,heartbeat,source) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (RUN_ID, TS, json.dumps(["BTC","ETH","RPL"]),
+             json.dumps({"BTC":BTC_PRICE,"ETH":ETH_PRICE,"RPL":RPL_PRICE}),
+             FNG_VALUE, len(signals), json.dumps(tags),
+             open(f"{WORKSPACE}/cowork_analysis_{RUN_ID}.md").read(),
+             json.dumps(log), "cowork"))
+        conn.commit(); conn.close()
+        print("Report saved to clone DB (fallback)")
+    except Exception as e2:
+        print(f"Fallback DB write also failed: {e2}")
+```
+
 ## 10. FINAL REPORT
 
 Output a concise summary:

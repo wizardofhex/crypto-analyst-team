@@ -1215,7 +1215,25 @@ def page_overview() -> None:
     total_closed = len(closed)
     wins = int((closed["outcome_pct"].dropna() > 0).sum()) if not closed.empty else 0
     win_rate = round(wins / total_closed * 100, 1) if total_closed else None
-    total_pnl_pct = num(closed["outcome_pct"].dropna().sum()) if not closed.empty else 0.0
+    # Weighted-average P&L % (by position_size_usd); falls back to simple avg
+    if not closed.empty:
+        _oc = closed.dropna(subset=["outcome_pct"])
+        if (not _oc.empty
+                and "position_size_usd" in _oc.columns
+                and _oc["position_size_usd"].notna().any()):
+            _ws = _oc[_oc["position_size_usd"].notna()]
+            _sizes = _ws["position_size_usd"].astype(float)
+            _total_size = _sizes.sum()
+            if _total_size > 0:
+                total_pnl_pct = float(
+                    (_ws["outcome_pct"].astype(float) * _sizes).sum() / _total_size
+                )
+            else:
+                total_pnl_pct = float(_oc["outcome_pct"].mean())
+        else:
+            total_pnl_pct = float(_oc["outcome_pct"].mean())
+    else:
+        total_pnl_pct = 0.0
     avg_conf = num(all_recs["confidence"].dropna().mean()) if "confidence" in all_recs else None
 
     realized_usd = 0.0
@@ -1243,7 +1261,7 @@ def page_overview() -> None:
             f"{len(open_recs)} open · {total_closed} closed")
     with c3:
         kpi("Closed P&L %", fmt_pct(total_pnl_pct),
-            "sum of outcomes", tone_from_num(total_pnl_pct))
+            "size-weighted avg return", tone_from_num(total_pnl_pct))
     with c4:
         kpi("Open Positions", fmt_int(len(open_recs)), "tracked calls")
     with c5:

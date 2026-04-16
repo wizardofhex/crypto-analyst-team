@@ -791,6 +791,8 @@ def _db() -> sqlite3.Connection:
         )
         st.stop()
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -1296,6 +1298,7 @@ def page_overview() -> None:
                     x=hdf["ts"], y=hdf["val"],
                     fill="tozeroy", fillcolor="rgba(96,165,250,.06)",
                     line=dict(color=C_ACC, width=1.2), mode="lines",
+                    hovertemplate="Date: %{x|%b %d}<br>F&G: %{y}<extra></extra>",
                 ))
                 ftr.update_layout(
                     height=70, paper_bgcolor=_PLOT_BG, plot_bgcolor=_PLOT_BG,
@@ -1329,6 +1332,7 @@ def page_overview() -> None:
             marker_color=[ANALYST_COLORS.get(a, C_ACC) for a in counts.index],
             text=counts.values, textposition="outside",
             textfont=dict(size=10, color=C_TEXT),
+            hovertemplate="<b>%{x}</b><br>Total Calls: %{y}<extra></extra>",
         ))
         fig.update_layout(**ply(
             height=160, showlegend=False,
@@ -1433,6 +1437,9 @@ def page_leaderboard() -> None:
                   else C_NEG if (v is not None and v < 50)
                   else C_GRID
                   for v in lb["Win Rate %"]]
+        wins_list = lb.get("W", pd.Series([None]*len(lb)))
+        losses_list = lb.get("L", pd.Series([None]*len(lb)))
+        calls_list = lb.get("Calls", pd.Series([None]*len(lb)))
         fig = go.Figure(go.Bar(
             x=lb["Analyst"], y=wr,
             marker_color=colors,
@@ -1440,6 +1447,18 @@ def page_leaderboard() -> None:
                   for v in lb["Win Rate %"]],
             textposition="outside",
             textfont=dict(size=10, color=C_TEXT),
+            customdata=np.column_stack([
+                calls_list.fillna(0).values,
+                wins_list.fillna(0).values,
+                losses_list.fillna(0).values,
+            ]),
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                "Win Rate: %{y:.1f}%%<br>"
+                "Record: %{customdata[1]:.0f}W / %{customdata[2]:.0f}L "
+                "(%{customdata[0]:.0f} closed calls)"
+                "<extra></extra>"
+            ),
         ))
         fig.add_hline(y=50, line_dash="dash", line_color=C_AXIS, line_width=1)
         fig.update_layout(**ply(
@@ -1456,12 +1475,24 @@ def page_leaderboard() -> None:
         colors = [C_POS if (v is not None and v >= 0)
                   else C_NEG if v is not None else C_GRID
                   for v in lb["Avg Return %"]]
+        best_list = lb.get("Best %", pd.Series([None]*len(lb)))
+        worst_list = lb.get("Worst %", pd.Series([None]*len(lb)))
         fig2 = go.Figure(go.Bar(
             x=lb["Analyst"], y=ar,
             marker_color=colors,
             text=[fmt_pct(v) for v in lb["Avg Return %"]],
             textposition="outside",
             textfont=dict(size=10, color=C_TEXT),
+            customdata=np.column_stack([
+                best_list.fillna(0).values,
+                worst_list.fillna(0).values,
+            ]),
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                "Avg Return: %{y:.2f}%%<br>"
+                "Best: %{customdata[0]:.2f}%% · Worst: %{customdata[1]:.2f}%%"
+                "<extra></extra>"
+            ),
         ))
         fig2.add_hline(y=0, line_color=C_AXIS, line_width=1)
         fig2.update_layout(**ply(height=260, showlegend=False))
@@ -1500,6 +1531,11 @@ def page_leaderboard() -> None:
                 fillcolor=f"rgba({rgba[0]},{rgba[1]},{rgba[2]},.12)",
                 line=dict(color=ANALYST_COLORS.get(analyst, C_ACC), width=1.5),
                 name=analyst,
+                hovertemplate=(
+                    "<b>%{fullData.name}</b><br>"
+                    "%{theta}: %{r:.0f} / 100 (normalized)"
+                    "<extra></extra>"
+                ),
             ))
         fig_r.update_layout(
             polar=dict(
@@ -1534,10 +1570,15 @@ def page_active() -> None:
     syms   = tuple(open_recs["symbol"].dropna().unique().tolist())
     prices = fetch_prices(syms)
 
+    if not prices:
+        st.warning("⚠ Live prices unavailable — CoinGecko may be rate-limited. "
+                   "Current price, unrealized P&L, and distance-to-target/stop "
+                   "columns will show — until the next refresh.")
+
     rows: List[Dict[str, Any]] = []
     for _, rec in open_recs.iterrows():
         sym   = fmt_text(rec.get("symbol"), fallback="?")
-        cur   = prices.get(sym)
+        cur   = prices.get(sym.upper())
         entry = num(rec.get("entry_price"))
         direction = str(rec.get("recommendation") or "LONG").upper()
         pos_usd   = num(rec.get("position_size_usd"))
@@ -1630,6 +1671,11 @@ def page_active() -> None:
             text=[fmt_pct(v) for v in vals],
             textposition="outside",
             textfont=dict(size=10, color=C_TEXT),
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                "Unrealized: %{y:.2f}%%<br>"
+                "<extra></extra>"
+            ),
         ))
         fig.add_hline(y=0, line_color=C_AXIS, line_width=1)
         fig.update_layout(**ply(
@@ -1669,7 +1715,9 @@ def page_performance() -> None:
     fig_wr = go.Figure()
     any_trace = False
     for analyst in analysts_sel:
-        sub = closed[closed["analyst"] == analyst].sort_values("timestamp")
+        sub = (closed[closed["analyst"] == analyst]
+               .dropna(subset=["timestamp"])
+               .sort_values("timestamp"))
         if sub.empty:
             continue
         any_trace = True
@@ -1679,6 +1727,14 @@ def page_performance() -> None:
             x=sub["timestamp"], y=(wins_cum / total_cum * 100),
             mode="lines", name=analyst,
             line=dict(color=ANALYST_COLORS.get(analyst, C_ACC), width=1.8),
+            customdata=np.column_stack([total_cum.values, wins_cum.values]),
+            hovertemplate=(
+                "<b>%{fullData.name}</b><br>"
+                "Date: %{x|%Y-%m-%d %H:%M UTC}<br>"
+                "Win Rate: %{y:.1f}%%<br>"
+                "Wins: %{customdata[1]:.0f} / %{customdata[0]:.0f} calls"
+                "<extra></extra>"
+            ),
         ))
     if any_trace:
         fig_wr.add_hline(y=50, line_dash="dash", line_color=C_AXIS, line_width=1)
@@ -1698,7 +1754,7 @@ def page_performance() -> None:
 
     with c1:
         sec("Monthly Call Volume")
-        monthly = all_recs.copy()
+        monthly = all_recs.dropna(subset=["timestamp"]).copy()
         monthly["month"] = monthly["timestamp"].dt.strftime("%Y-%m")
         mc = (
             monthly[monthly["analyst"].isin(analysts_sel)]
@@ -1706,7 +1762,11 @@ def page_performance() -> None:
         )
         if not mc.empty:
             fig_m = px.bar(mc, x="month", y="n", color="analyst",
-                           color_discrete_map=ANALYST_COLORS, barmode="stack")
+                           color_discrete_map=ANALYST_COLORS, barmode="stack",
+                           labels={"month": "Month", "n": "Calls", "analyst": "Analyst"})
+            fig_m.update_traces(
+                hovertemplate="<b>%{fullData.name}</b><br>Month: %{x}<br>Calls: %{y}<extra></extra>",
+            )
             fig_m.update_layout(**ply(height=270))
             st.plotly_chart(fig_m, use_container_width=True,
                             config={"displayModeBar": False})
@@ -1759,6 +1819,11 @@ def page_performance() -> None:
             colorbar=dict(tickfont=dict(color=C_TEXT),
                           title=dict(text="Avg %",
                                      font=dict(color=C_TEXT, size=10))),
+            hovertemplate=(
+                "<b>%{y}</b> on <b>%{x}</b><br>"
+                "Avg Return: %{z:.2f}%%"
+                "<extra></extra>"
+            ),
         ))
         fig_h.update_layout(
             paper_bgcolor=_PLOT_BG, plot_bgcolor=_PLOT_BG,
@@ -1777,15 +1842,31 @@ def page_performance() -> None:
     fig_cum = go.Figure()
     any_trace = False
     for analyst in analysts_sel:
-        sub = closed[closed["analyst"] == analyst].sort_values("timestamp")
+        sub = (closed[closed["analyst"] == analyst]
+               .dropna(subset=["timestamp"])
+               .sort_values("timestamp"))
         if sub.empty:
             continue
         any_trace = True
+        cum_pnl = sub["outcome_pct"].fillna(0).cumsum()
+        individual_pnl = sub["outcome_pct"].fillna(0)
         fig_cum.add_trace(go.Scatter(
-            x=sub["timestamp"], y=sub["outcome_pct"].fillna(0).cumsum(),
+            x=sub["timestamp"], y=cum_pnl,
             mode="lines+markers", name=analyst,
             line=dict(color=ANALYST_COLORS.get(analyst, C_ACC), width=1.8),
             marker=dict(size=4),
+            customdata=np.column_stack([
+                individual_pnl.values,
+                sub["symbol"].values,
+                sub["recommendation"].values,
+            ]),
+            hovertemplate=(
+                "<b>%{fullData.name}</b><br>"
+                "Date: %{x|%Y-%m-%d %H:%M UTC}<br>"
+                "Cumulative P&L: %{y:.2f}%%<br>"
+                "This Trade: %{customdata[0]}%% (%{customdata[2]} %{customdata[1]})"
+                "<extra></extra>"
+            ),
         ))
     if any_trace:
         fig_cum.add_hline(y=0, line_color=C_AXIS, line_width=1)
@@ -1972,6 +2053,7 @@ def page_coin() -> None:
                 x=list(range(len(spark))), y=spark,
                 mode="lines", fill="tozeroy",
                 fillcolor=fill_c, line=dict(color=line_c, width=1.8),
+                hovertemplate="Price: $%{y:,.2f}<extra></extra>",
             ))
             # Open-position entry overlays
             for _, r in coin_recs[coin_recs["status"] == "OPEN"].iterrows():
@@ -2016,6 +2098,13 @@ def page_coin() -> None:
                     text=[fmt_pct(v) for v in pa["Avg %"]],
                     textposition="outside",
                     textfont=dict(size=10, color=C_TEXT),
+                    customdata=pa["Calls"].values,
+                    hovertemplate=(
+                        "<b>%{y}</b><br>"
+                        "Avg Return: %{x:.2f}%%<br>"
+                        "Closed Calls: %{customdata}"
+                        "<extra></extra>"
+                    ),
                 ))
                 fig_ab.add_vline(x=0, line_color=C_AXIS, line_width=1)
                 fig_ab.update_layout(**ply(
@@ -2032,7 +2121,7 @@ def page_coin() -> None:
     # Agreement scatter
     sec("Daily Analyst Agreement vs Outcome")
     if not coin_close.empty and closed_c >= 3:
-        cc = coin_close.copy()
+        cc = coin_close.dropna(subset=["timestamp"]).copy()
         cc["date"] = cc["timestamp"].dt.date
         ag_rows: List[Dict[str, Any]] = []
         for date, grp in cc.groupby("date"):

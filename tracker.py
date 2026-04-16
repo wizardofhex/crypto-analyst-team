@@ -18,12 +18,27 @@ VALID_RECOMMENDATIONS = {"LONG", "SHORT", "WATCH", "AVOID", "NEUTRAL"}
 VALID_STATUSES = {"OPEN", "CLOSED", "EXPIRED"}
 
 
+def _connect(timeout: int = 30) -> sqlite3.Connection:
+    """
+    Open a SQLite connection with WAL journal mode.
+
+    WAL (Write-Ahead Logging) uses reusable -wal/-shm files instead of a
+    -journal file that must be deleted after each commit.  This prevents the
+    persistent "disk I/O error" caused by FUSE / bindfs / Google-Drive mounts
+    where file deletion silently fails and leaves a stale rollback journal.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=timeout)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")   # safe with WAL, fewer fsyncs
+    return conn
+
+
 # ─── Schema ───────────────────────────────────────────────────────────────────
 
 
 def init_db() -> None:
     """Create all tables if they don't exist yet."""
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS recommendations (
@@ -111,7 +126,7 @@ def save_recommendation(
     if rec not in VALID_RECOMMENDATIONS:
         raise ValueError(f"Invalid recommendation '{rec}'. Must be one of {VALID_RECOMMENDATIONS}")
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         cursor = conn.execute(
             """
             INSERT INTO recommendations
@@ -154,7 +169,7 @@ def close_recommendation(
     if status not in VALID_STATUSES:
         raise ValueError(f"Invalid status '{status}'.")
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         row = conn.execute(
             "SELECT recommendation, entry_price, analyst FROM recommendations WHERE id = ?",
             (rec_id,),
@@ -188,7 +203,7 @@ def close_recommendation(
 
 def get_open_recommendations(symbol: Optional[str] = None) -> List[Dict[str, Any]]:
     """Return all OPEN recommendations, optionally filtered by symbol."""
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         conn.row_factory = sqlite3.Row
         if symbol:
             rows = conn.execute(
@@ -241,7 +256,7 @@ def get_recent_calls(
     query += " ORDER BY timestamp DESC LIMIT ?"
     params.append(limit)
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
@@ -264,7 +279,7 @@ def get_recommendations_history(
         params.append(analyst)
 
     query = f"SELECT * FROM recommendations WHERE {' AND '.join(conditions)} ORDER BY timestamp DESC"
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         conn.row_factory = sqlite3.Row
         return [dict(r) for r in conn.execute(query, params).fetchall()]
 
@@ -274,7 +289,7 @@ def get_recommendations_history(
 
 def update_analyst_stats(analyst: str) -> None:
     """Recompute and upsert win/loss stats for one analyst from closed recs."""
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         rows = conn.execute(
             "SELECT outcome_pct FROM recommendations WHERE analyst = ? AND status = 'CLOSED' AND outcome_pct IS NOT NULL",
             (analyst,),
@@ -303,7 +318,7 @@ def update_analyst_stats(analyst: str) -> None:
 
 def get_analyst_performance(analyst: Optional[str] = None) -> List[Dict[str, Any]]:
     """Return performance rows for one or all analysts."""
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         conn.row_factory = sqlite3.Row
         if analyst:
             rows = conn.execute(
@@ -321,7 +336,7 @@ def get_analyst_performance(analyst: Optional[str] = None) -> List[Dict[str, Any
 
 def save_lookback_memory(symbol: str, days: int, summary: str) -> None:
     """Persist a lookback lesson summary for future prompt injection."""
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         conn.execute(
             "INSERT INTO lookback_memory (symbol, days, generated_at, summary) VALUES (?, ?, ?, ?)",
             (symbol.upper(), days, _utcnow(), summary),
@@ -331,7 +346,7 @@ def save_lookback_memory(symbol: str, days: int, summary: str) -> None:
 
 def get_latest_lookback_memory(symbol: str) -> Optional[str]:
     """Return the most recently generated lookback summary for a symbol."""
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         row = conn.execute(
             "SELECT summary FROM lookback_memory WHERE symbol = ? ORDER BY generated_at DESC LIMIT 1",
             (symbol.upper(),),

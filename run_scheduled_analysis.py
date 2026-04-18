@@ -34,6 +34,7 @@ from tracker import (
     check_and_close_positions,
     get_latest_lookback_memory,
     init_db,
+    save_analysis_report,
     save_recommendation,
 )
 
@@ -133,8 +134,16 @@ def analyze_coin(
     symbol: str,
     team: Dict,
     client: anthropic.Anthropic,
-) -> int:
-    """Run all analysts on a single coin. Returns number of signals saved."""
+) -> Dict[str, object]:
+    """Run all analysts on a single coin.
+
+    Returns a dict with keys:
+      - signals_saved (int)
+      - report_md (str): per-coin markdown section suitable for the report
+      - price (Optional[float]): spot price used
+      - fear_greed (Optional[int]): current F&G value (same across coins)
+      - degraded (List[str]): data-quality tags picked up from market_data
+    """
     symbol = symbol.upper()
     logger.info("Fetching market data for %s...", symbol)
     market_data = fetch_all_market_data(symbol)
@@ -142,10 +151,13 @@ def analyze_coin(
     cg = market_data.get("coingecko", {})
     current_price: Optional[float] = cg.get("price")
 
+    degraded: List[str] = []
     if cg.get("_rate_limited"):
         logger.warning("CoinGecko rate-limited for %s — proceeding with indicators only", symbol)
+        degraded.append(f"cg-rate-limited-{symbol}")
 
     # Auto-close positions that hit target/stop
+    closed_lines: List[str] = []
     if current_price:
         closed = check_and_close_positions(symbol, current_price)
         for c in closed:
@@ -154,13 +166,31 @@ def analyze_coin(
                 c.get("id"), c.get("direction"), symbol,
                 c.get("close_price"), c.get("outcome"),
             )
+            closed_lines.append(
+                f"- #{c.get('id')} {c.get('analyst')} {c.get('direction')} "
+                f"@ ${c.get('entry_price')} → ${c.get('close_price')} "
+                f"({c.get('outcome')}, {c.get('pnl_pct')}%)"
+            )
 
     # Load lookback memory
     memory = get_latest_lookback_memory(symbol)
 
+    # Fear & Greed is coin-independent but we surface it for the report
+    fng_block = market_data.get("fear_greed", {}) or {}
+    fear_greed_val: Optional[int] = fng_block.get("value")
+
     question = f"Give me your full analysis of {symbol} right now based on the live data above."
     prior_responses: List[Dict[str, str]] = []
     signals_saved = 0
+
+    # Build per-coin report section
+    lines: List[str] = []
+    lines.append(f"## {symbol} — 11-Analyst Breakdown (spot ${current_price})")
+    lines.append("")
+    if closed_lines:
+        lines.append("**Auto-closed positions this run:**")
+        lines.extend(closed_lines)
+        lines.append("")
 
     for name in ANALYST_ORDER:
         analyst = team[name]
@@ -170,11 +200,26 @@ def analyze_coin(
             rec_id = parse_signal(response, name, symbol, current_price)
             if rec_id:
                 signals_saved += 1
+            lines.append(f"### {name} — {analyst.role}")
+            lines.append("")
+            lines.append(response.strip())
+            lines.append("")
         except Exception as exc:
             logger.error("%s failed on %s: %s", name, symbol, exc)
+            lines.append(f"### {name} — ERROR")
+            lines.append("")
+            lines.append(f"`{exc}`")
+            lines.append("")
+            degraded.append(f"{name}-failed-{symbol}")
 
     logger.info("%s analysis complete — %d signals saved", symbol, signals_saved)
-    return signals_saved
+    return {
+        "signals_saved": signals_saved,
+        "report_md": "\n".join(lines),
+        "price": current_price,
+        "fear_greed": fear_greed_val,
+        "degraded": degraded,
+    }
 
 
 def git_push_db() -> bool:
@@ -224,17 +269,83 @@ def main() -> None:
     client = anthropic.Anthropic()
     team = create_analyst_team(client, args.model)
 
+    start_dt = datetime.now(timezone.utc)
+    run_id = start_dt.strftime("%Y%m%d_%H%MZ")
+    run_ts = start_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
     total_signals = 0
+    section_mds: List[str] = []
+    prices: Dict[str, float] = {}
+    fear_greed: Optional[int] = None
+    tags: List[str] = [f"local-runner", f"model:{args.model}"]
+
     for symbol in args.coins:
         try:
-            total_signals += analyze_coin(symbol, team, client)
+            result = analyze_coin(symbol, team, client)
+            total_signals += int(result.get("signals_saved", 0))
+            section_mds.append(str(result.get("report_md", "")))
+            price = result.get("price")
+            if isinstance(price, (int, float)):
+                prices[symbol.upper()] = float(price)
+            fg = result.get("fear_greed")
+            if fear_greed is None and isinstance(fg, int):
+                fear_greed = fg
+            degraded = result.get("degraded") or []
+            if isinstance(degraded, list):
+                tags.extend(str(t) for t in degraded)
         except Exception as exc:
             logger.error("Failed to analyze %s: %s", symbol, exc)
+            tags.append(f"analyze-failed-{symbol}")
 
     logger.info(
         "Scheduled run complete: %d coins, %d signals saved",
         len(args.coins), total_signals,
     )
+
+    # ── Build + persist the full analysis report for the dashboard History page ──
+    header = [
+        f"# Scheduled Analysis — {run_ts}",
+        "",
+        f"**Run ID:** `{run_id}`  ",
+        f"**Model:** `{args.model}`  ",
+        f"**Coins:** {', '.join(args.coins)}  ",
+        f"**Prices:** " + ", ".join(f"{k}=${v}" for k, v in prices.items()) + "  ",
+        f"**Fear & Greed:** {fear_greed if fear_greed is not None else 'n/a'}  ",
+        f"**Signals persisted (LONG/SHORT):** {total_signals}",
+        "",
+    ]
+    full_md = "\n".join(header) + "\n\n" + "\n\n".join(section_mds)
+
+    # Deduplicate tags while preserving order
+    seen = set()
+    dedup_tags = [t for t in tags if not (t in seen or seen.add(t))]
+
+    try:
+        report_id = save_analysis_report(
+            run_id=run_id,
+            timestamp=run_ts,
+            coins=[c.upper() for c in args.coins],
+            report_md=full_md,
+            prices=prices or None,
+            fear_greed=fear_greed,
+            signals_count=total_signals,
+            tags=dedup_tags,
+            heartbeat={
+                "run_id": run_id,
+                "started": run_ts,
+                "ended": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                "coins": [c.upper() for c in args.coins],
+                "prices": prices,
+                "fear_greed": fear_greed,
+                "signals_count": total_signals,
+                "tags": dedup_tags,
+                "model": args.model,
+            },
+            source="local",
+        )
+        logger.info("analysis_reports row saved id=%s run_id=%s", report_id, run_id)
+    except Exception as exc:
+        logger.error("Failed to save analysis_report: %s", exc)
 
     if args.push:
         git_push_db()

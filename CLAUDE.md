@@ -22,21 +22,29 @@ GitHub: wizardofhex/crypto-analyst-team (public)
 
 ## The 11 Analysts
 
-| # | Name | Role | Runs In Order |
-|---|------|------|:---:|
-| 1 | **ARIA** | Technical Analyst (RSI, MACD, BB, EMA) | 1st |
-| 2 | **MARCUS** | Tape Reader (volume, order flow, price action) | 2nd |
-| 3 | **NOVA** | Macro/Catalyst (sentiment, funding rates, news) | 3rd |
-| 4 | **VEGA** | Derivatives/Options (put/call, IV, gamma, max pain) | 4th |
-| 5 | **DELTA** | Futures/Perpetuals (OI, liquidations, basis) | 5th |
-| 6 | **CHAIN** | On-Chain (exchange flows, MVRV, NUPL, whales) | 6th |
-| 7 | **QUANT** | Quantitative (correlations, vol regimes, stats) | 7th |
-| 8 | **DEFI** | DeFi/Yield (TVL, protocol revenue, unlocks) | 8th |
-| 9 | **ATLAS** | Geopolitical/Regulatory (SEC, ETF flows, policy) | 9th |
-| 10 | **REX** | Risk Manager (stops, sizing, R/R) | 10th |
-| 11 | **ZEN** | Contrarian (fades crowded trades, FOMO/FUD) | 11th |
+| # | Name | Role | Cohort | Order In Cohort |
+|---|------|------|:---:|:---:|
+| 1 | **ARIA** | Technical Analyst (RSI, MACD, BB, EMA) | 1 (parallel) | — |
+| 2 | **MARCUS** | Tape Reader (volume, order flow, price action) | 1 (parallel) | — |
+| 3 | **NOVA** | Macro/Catalyst (sentiment, funding rates, news) | 1 (parallel) | — |
+| 4 | **VEGA** | Derivatives/Options (put/call, IV, gamma, max pain) | 1 (parallel) | — |
+| 5 | **DELTA** | Futures/Perpetuals (OI, liquidations, basis) | 1 (parallel) | — |
+| 6 | **CHAIN** | On-Chain (exchange flows, MVRV, NUPL, whales) | 2 (sequential) | 1st |
+| 7 | **QUANT** | Quantitative (correlations, vol regimes, stats) | 2 (sequential) | 2nd |
+| 8 | **DEFI** | DeFi/Yield (TVL, protocol revenue, unlocks) | 2 (sequential) | 3rd |
+| 9 | **ATLAS** | Geopolitical/Regulatory (SEC, ETF flows, policy) | 2 (sequential) | 4th |
+| 10 | **REX** | Risk Manager (stops, sizing, R/R, EXPOSURE_BLOCK) | 2 (sequential) | 5th |
+| 11 | **ZEN** | Contrarian (gated by numeric triggers) | 2 (sequential) | 6th |
 
-REX and ZEN run last so they can synthesize and challenge the full team's output.
+**Cohort 1 runs in parallel — no analyst sees another's response.** This
+breaks the ordering-bias cascade identified in the 2026-04-20 lookback
+(analysts 6–11 were rubber-stamping the first five). Display order of cohort 1
+is randomized per run. Cohort 2 runs sequentially and sees the full cohort 1
+transcript because those seats are explicit synthesizers.
+
+REX (#10) runs second-to-last so his `EXPOSURE_BLOCK: YES/NO` directive can be
+parsed and injected into ZEN's guardrail context before ZEN runs. See
+`docs/LOOKBACK_RECS_20260420.md` for the full rationale.
 
 ## Key Files
 
@@ -47,11 +55,34 @@ REX and ZEN run last so they can synthesize and challenge the full team's output
 | `data_fetcher.py` | CoinGecko, Binance, Deribit, CoinGlass, DeFiLlama, Blockchain.com |
 | `indicators.py` | RSI, MACD, BB, EMA, ATR, StochRSI, VWAP, pivots (pure pandas/numpy) |
 | `tracker.py` | SQLite CRUD for recommendations, analyst stats, lookback memory |
-| `performance.py` | Performance reports, open P&L, lookback post-mortems |
+| `guardrails.py` | Pre-prompt exposure / cooldown / confidence-calibration guardrails |
+| `performance.py` | Performance reports, open P&L, lookback post-mortems (v2 helpers) |
 | `main.py` | Interactive Rich terminal UI with /commands |
 | `dashboard.py` | Streamlit web dashboard (7 pages) |
-| `run_scheduled_analysis.py` | Headless runner for cron/scheduled execution |
+| `run_scheduled_analysis.py` | Headless runner (two-cohort parallel/sequential) |
 | `start.py` | Launcher (starts dashboard + chat together) |
+
+## Guardrail Invariants (added 2026-04-20)
+
+The scheduled runner enforces these invariants before each analyst call. See
+`docs/LOOKBACK_RECS_20260420.md` for the full rationale.
+
+- **Exposure guard.** Same-direction open notional on a coin ≥10% of portfolio
+  triggers a WARNING block; ≥15% triggers a HARD CAP that forces downstream
+  analysts to WATCH or ≤0.5% sizing.
+- **Cooldown guard.** Any CLOSED losing position on a coin within the last
+  12h injects a re-entry warning into every subsequent analyst's prompt on
+  that coin.
+- **Confidence calibration.** Each analyst sees their own rolling 30-day
+  conf→outcome history for the coin they're about to call. Inverted
+  calibration (high-conf = low win-rate) is surfaced in-prompt.
+- **REX EXPOSURE_BLOCK.** REX **must** emit `EXPOSURE_BLOCK: YES` or `:NO` on
+  every call. The runner parses this and passes the directive into ZEN's
+  guardrail context. Missing directives log `rex-missing-exposure-block-<SYM>`
+  in the run's `tags` field.
+- **ZEN numeric trigger.** ZEN may only publish LONG/SHORT when at least one
+  of funding rate / F&G / put-call ratio / 7+ team alignment hits a defined
+  threshold. No trigger → mandatory WATCH/NEUTRAL.
 
 ## Data Sources
 

@@ -80,6 +80,24 @@ ANALYST_CONFIGS: Dict[str, Dict[str, str]] = {
             "You ALWAYS give a specific stop loss, target, AND calculated position size. "
             "Phrases: 'What's the downside?', 'Size accordingly', 'The market doesn't care about your thesis'. "
             "You compute R/R ratios and call out setups with poor risk profiles.\n\n"
+            "CRITICAL — YOU ARE THE ONLY SEAT THAT GETS TO ABSTAIN. If the team is already "
+            "heavily exposed on this coin in one direction (see the OPEN BOOK EXPOSURE block "
+            "in your context, when present), your job is to CHALLENGE the book, not rubber-stamp "
+            "another same-direction call. The 2026-04-13..19 lookback showed you went LONG 28/28 "
+            "on BTC and 27/1 on ETH — a 0% challenge rate. That is trading the team's narrative, "
+            "not risk management. If the book is already at or above the warning line, your "
+            "default is WATCH or a reduced-size contrary call. A disagreeable REX is a REX "
+            "doing his job.\n\n"
+            "EXPOSURE_BLOCK DIRECTIVE — REQUIRED OUTPUT LINE:\n"
+            "  Immediately before your [SIGNAL: ...] line, emit EXACTLY ONE line in this format:\n"
+            "    EXPOSURE_BLOCK: YES    (the book is over-extended; downstream analysts must "
+            "downgrade or size ≤0.5%)\n"
+            "    EXPOSURE_BLOCK: NO     (the book has headroom; normal sizing applies)\n"
+            "  Rule: say YES whenever open same-direction exposure on this coin is already "
+            "above the EXPOSURE_WARN line shown in your context OR when 5+ analysts are "
+            "already pointing the same way in today's round. Say NO only when you're actively "
+            "saying 'there is room for this trade'. The downstream runner parses this line — "
+            "do not omit it.\n\n"
             "POSITION SIZING FORMULA (you must always calculate this for LONG/SHORT calls):\n"
             f"  Portfolio: ${PORTFOLIO_SIZE:,}\n"
             "  Step 1 — Risk amount: Use 1% of portfolio ($1,240) by default.\n"
@@ -99,7 +117,7 @@ ANALYST_CONFIGS: Dict[str, Dict[str, str]] = {
         ),
         "focus": (
             "Position sizing, stop loss placement, risk/reward ratios, "
-            "portfolio exposure, drawdown analysis"
+            "portfolio exposure, drawdown analysis, EXPOSURE_BLOCK directive"
         ),
     },
     "ZEN": {
@@ -112,10 +130,27 @@ ANALYST_CONFIGS: Dict[str, Dict[str, str]] = {
             "You are NOT a perma-bear or perma-bull — you're looking for the trade no one else sees. "
             "Phrases: 'When the crowd is this aligned...', 'The pain trade is...', "
             "'FOMO detector is flashing', 'Crowded trade alert'. "
-            "You push back on the other analysts when they're all pointing the same direction."
+            "You push back on the other analysts when they're all pointing the same direction.\n\n"
+            "MANDATORY — NUMERIC CONTRARIAN TRIGGER. The 2026-04-20 lookback showed you "
+            "firing lone-SHORT fades on 'vibes of crowdedness' and losing (-1.4% avg on ETH, "
+            "sub-25% on RPL). Your contrarian seat is expensive when untethered from data. "
+            "From this call forward, you may only publish a LONG or SHORT signal when at least "
+            "ONE of these numeric triggers is true, and you must cite it explicitly:\n"
+            "  • Funding rate > 0.05% (longs crowded) — supports SHORT\n"
+            "  • Funding rate < -0.05% (shorts crowded) — supports LONG\n"
+            "  • Fear & Greed index ≥ 75 (extreme greed) — supports SHORT\n"
+            "  • Fear & Greed index ≤ 25 (extreme fear) — supports LONG\n"
+            "  • Put/Call ratio > 1.3 (put-heavy) — supports LONG\n"
+            "  • Put/Call ratio < 0.6 (call-heavy) — supports SHORT\n"
+            "  • 7+ analysts in this round already aligned same direction — may support a fade "
+            "    but requires one of the above numeric triggers as well\n"
+            "If NO numeric trigger is present, your signal MUST be WATCH or NEUTRAL — do not "
+            "fade on intuition alone. Cite the trigger's actual value from the live data "
+            "(e.g. 'F&G at 22 — extreme fear contrarian LONG')."
         ),
         "focus": (
-            "Devil's advocate, overextended moves, FOMO/FUD identification, fading crowded trades"
+            "Devil's advocate, overextended moves, FOMO/FUD identification, fading crowded trades "
+            "(gated by numeric triggers — see personality)"
         ),
     },
     "VEGA": {
@@ -697,8 +732,22 @@ class Analyst:
         self,
         market_data_block: str = "",
         memory: Optional[str] = None,
+        guardrail_block: Optional[str] = None,
     ) -> str:
-        """Assemble the full system prompt for this analyst."""
+        """Assemble the full system prompt for this analyst.
+
+        Parameters
+        ----------
+        market_data_block : str
+            Rendered live market data (price, technicals, sentiment, etc).
+        memory : Optional[str]
+            Lookback memory (5-section post-mortem) to inject near the end.
+        guardrail_block : Optional[str]
+            Runtime guardrail text from guardrails.build_guardrail_block()
+            — exposure snapshot, cooldown warnings, and this analyst's
+            confidence calibration. Injected just after team context so it
+            shapes the analyst's framing before they see any prior responses.
+        """
         team_context = (
             "You are one of eleven crypto analyst agents:\n"
             "  ARIA   — Technical (RSI, MACD, EMA, Bollinger Bands)\n"
@@ -744,6 +793,11 @@ class Analyst:
 
         parts = [self._personality, "", team_context, rules]
 
+        # Guardrails go early — they shape the analyst's framing before data.
+        # Only inject if the caller supplied non-empty content.
+        if guardrail_block and guardrail_block.strip():
+            parts += ["", guardrail_block]
+
         if market_data_block:
             parts += ["", market_data_block]
 
@@ -786,6 +840,7 @@ class Analyst:
         market_data: Dict[str, Any],
         prior_responses: Optional[List[Dict[str, str]]] = None,
         memory: Optional[str] = None,
+        guardrail_block: Optional[str] = None,
     ) -> str:
         """
         Generate a market analysis response with live data injected.
@@ -795,10 +850,15 @@ class Analyst:
             market_data:      Dict from data_fetcher.fetch_all_market_data().
             prior_responses:  List of {'analyst', 'role', 'response'} dicts from earlier agents.
             memory:           Optional lookback lesson text to prepend.
+            guardrail_block:  Optional runtime guardrails (exposure, cooldown,
+                              calibration). See guardrails.build_guardrail_block.
+                              When omitted the analyst runs as before (no
+                              guardrails) — this keeps interactive main.py and
+                              existing tests unchanged.
         """
         symbol = market_data.get("symbol", "UNKNOWN")
         market_block = format_market_data_for_prompt(market_data, symbol)
-        system_prompt = self._build_system_prompt(market_block, memory)
+        system_prompt = self._build_system_prompt(market_block, memory, guardrail_block)
 
         user_content = f"User question: {user_message}\n"
         if prior_responses:

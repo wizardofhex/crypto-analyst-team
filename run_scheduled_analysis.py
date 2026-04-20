@@ -12,8 +12,10 @@ Usage:
 """
 
 import argparse
+import concurrent.futures
 import logging
 import os
+import random
 import re
 import subprocess
 import sys
@@ -30,12 +32,36 @@ import anthropic
 from agents import create_analyst_team
 from config import ANALYST_ORDER
 from data_fetcher import fetch_all_market_data
+from guardrails import (
+    build_guardrail_block,
+    parse_rex_exposure_block,
+    render_rex_block_note,
+)
 from tracker import (
     check_and_close_positions,
     get_latest_lookback_memory,
     init_db,
     save_analysis_report,
     save_recommendation,
+)
+
+# Analysts run in two cohorts. The first runs IN PARALLEL without seeing each
+# other — this is the cascade-break recommendation from the 2026-04-20 lookback:
+# eight of the eleven analysts were rubber-stamping the first five. The second
+# cohort runs sequentially and does see the first cohort (they are meant to
+# synthesize/challenge, not just vote). REX goes second-to-last so his
+# EXPOSURE_BLOCK directive can be parsed and injected into ZEN.
+FIRST_COHORT = ["ARIA", "MARCUS", "NOVA", "VEGA", "DELTA"]
+SECOND_COHORT = ["CHAIN", "QUANT", "DEFI", "ATLAS", "REX", "ZEN"]
+
+# Keep in sync with config.ANALYST_ORDER — a mismatch would silently drop or
+# double-run analysts and we'd lose a persona's output on every scheduled run.
+assert list(FIRST_COHORT) + list(SECOND_COHORT) == list(ANALYST_ORDER), (
+    f"Cohort split out of sync with ANALYST_ORDER:\n"
+    f"  cohorts: {FIRST_COHORT + SECOND_COHORT}\n"
+    f"  order:   {ANALYST_ORDER}\n"
+    "Update FIRST_COHORT/SECOND_COHORT in run_scheduled_analysis.py or "
+    "ANALYST_ORDER in config.py."
 )
 
 logging.basicConfig(
@@ -192,11 +218,86 @@ def analyze_coin(
         lines.extend(closed_lines)
         lines.append("")
 
-    for name in ANALYST_ORDER:
+    # ── Cohort 1 — run ARIA/MARCUS/NOVA/VEGA/DELTA in PARALLEL ─────────────
+    # The 2026-04-20 lookback showed ordering-bias: later analysts cascaded
+    # on the direction set by analysts 1–5. Running the first five
+    # concurrently without sight of each other breaks that cascade at the
+    # source. We also shuffle the logged order so no single seat anchors
+    # the display/report every time.
+    cohort1_order = FIRST_COHORT.copy()
+    random.shuffle(cohort1_order)
+
+    cohort1_results: Dict[str, Dict[str, object]] = {}
+
+    def _run_one(name: str) -> Dict[str, object]:
         analyst = team[name]
+        guardrails = build_guardrail_block(name, symbol)
         try:
-            response = analyst.analyze(question, market_data, prior_responses, memory)
-            prior_responses.append({"analyst": name, "role": analyst.role, "response": response})
+            response = analyst.analyze(
+                question, market_data, prior_responses=None,
+                memory=memory, guardrail_block=guardrails,
+            )
+            return {"name": name, "role": analyst.role, "response": response, "error": None}
+        except Exception as exc:  # pragma: no cover — exercised by live API calls
+            logger.error("%s failed on %s: %s", name, symbol, exc)
+            return {"name": name, "role": analyst.role, "response": None, "error": exc}
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(len(FIRST_COHORT), 5),
+        thread_name_prefix=f"cohort1-{symbol}",
+    ) as pool:
+        for res in pool.map(_run_one, FIRST_COHORT):
+            cohort1_results[str(res["name"])] = res
+
+    # Emit cohort-1 responses in the randomized display order and record
+    # each as a prior_response for cohort-2 context.
+    for name in cohort1_order:
+        res = cohort1_results.get(name, {})
+        response = res.get("response")
+        if response is None:
+            lines.append(f"### {name} — ERROR")
+            lines.append("")
+            lines.append(f"`{res.get('error')}`")
+            lines.append("")
+            degraded.append(f"{name}-failed-{symbol}")
+            continue
+
+        prior_responses.append({
+            "analyst": name,
+            "role": str(res.get("role", "")),
+            "response": str(response),
+        })
+        rec_id = parse_signal(str(response), name, symbol, current_price)
+        if rec_id:
+            signals_saved += 1
+        lines.append(f"### {name} — {res.get('role')}")
+        lines.append("")
+        lines.append(str(response).strip())
+        lines.append("")
+
+    # ── Cohort 2 — sequential, sees cohort 1 transcript ───────────────────
+    # REX goes second-to-last so we can parse his EXPOSURE_BLOCK directive
+    # and inject a note into ZEN.
+    rex_block_active: Optional[bool] = None
+
+    for name in SECOND_COHORT:
+        analyst = team[name]
+        guardrails = build_guardrail_block(name, symbol)
+
+        # After REX runs, append his exposure block note to ZEN's guardrail
+        # context so the contrarian respects the risk-manager directive.
+        if name == "ZEN" and rex_block_active is not None:
+            rex_note = render_rex_block_note(rex_block_active)
+            guardrails = (guardrails + "\n\n" + rex_note) if guardrails else rex_note
+
+        try:
+            response = analyst.analyze(
+                question, market_data, prior_responses,
+                memory=memory, guardrail_block=guardrails,
+            )
+            prior_responses.append({
+                "analyst": name, "role": analyst.role, "response": response,
+            })
             rec_id = parse_signal(response, name, symbol, current_price)
             if rec_id:
                 signals_saved += 1
@@ -204,6 +305,21 @@ def analyze_coin(
             lines.append("")
             lines.append(response.strip())
             lines.append("")
+
+            # Parse REX's directive for downstream use
+            if name == "REX":
+                parsed = parse_rex_exposure_block(response)
+                if parsed is not None:
+                    rex_block_active = parsed
+                    logger.info(
+                        "REX EXPOSURE_BLOCK: %s on %s",
+                        "YES" if parsed else "NO", symbol,
+                    )
+                else:
+                    logger.warning(
+                        "REX did not emit EXPOSURE_BLOCK directive on %s", symbol,
+                    )
+                    degraded.append(f"rex-missing-exposure-block-{symbol}")
         except Exception as exc:
             logger.error("%s failed on %s: %s", name, symbol, exc)
             lines.append(f"### {name} — ERROR")

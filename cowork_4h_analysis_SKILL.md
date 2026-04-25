@@ -1,7 +1,10 @@
 ---
 name: crypto-4h-analysis-cowork
 description: Cowork fallback — produce an 11-analyst crypto analysis for BTC/ETH/RPL, persist signals, push DB to GitHub.
+expected_model: claude-opus-4-7
 ---
+
+> **Expected runtime model:** `claude-opus-4-7` (set in the Cowork scheduled-task UI; this header is documentation for transparency in run history). Sonnet 4.6 is the cheaper fallback if cost becomes a concern — see PROJECT_EXPORT.md §5 for the cost comparison.
 
 You are the crypto-analyst-team running autonomously inside Cowork. Your job is to produce an 11-analyst market analysis for BTC, ETH, and RPL, persist signals to the project SQLite database, and push the updated DB to GitHub so the Streamlit Cloud dashboard redeploys. This is a fallback for the user's local Python runner (`run_scheduled_analysis.py`) which fires on the same 4-hour cron 30 minutes earlier. If the local runner already succeeded, detect that and exit quickly.
 
@@ -202,26 +205,291 @@ def _ema(arr, p):
     return e
 ```
 
+## 4.5. COMPUTE GUARDRAIL CONTEXT (2026-04-20 lookback recommendations)
+
+The 2026-04-20 weekly lookback surfaced three recurring failures the
+prior skill did not prevent: (a) 96/94/91% LONG bias with sub-35% win
+rates, (b) REX trading his own book (28/28 LONG on BTC), (c) ZEN firing
+lone-SHORT fades on vibes and losing. This section computes three
+per-(analyst, coin) context blocks — exposure, cooldown, and confidence
+calibration — that MUST be injected into each analyst's roleplay in §5.
+The blocks are read-only SQLite queries against `recommendations.db`
+(no new schema, no writes).
+
+Thresholds:
+- Exposure WARN: same-direction open notional ≥ 10% of $124K portfolio
+- Exposure HARD CAP: ≥ 15% — downstream analysts MUST downgrade or ≤0.5%
+- Cooldown window: 12h after a CLOSED losing position on that coin
+- Calibration window: rolling 30 days, min 4 closed calls per conf bucket
+
+```bash
+python3 << 'PY'
+import sqlite3, json, os
+WORKSPACE = os.environ.get("WORKSPACE") or "$WORKSPACE"
+SCRATCH   = os.environ.get("SCRATCH")   or "$SCRATCH"
+
+PORTFOLIO_SIZE = 124_000
+EXPOSURE_WARN_PCT = 10.0
+EXPOSURE_CAP_PCT  = 15.0
+COOLDOWN_HOURS    = 12
+CALIBRATION_DAYS  = 30
+CALIBRATION_MIN_N = 4
+COINS    = ["BTC", "ETH", "RPL"]
+ANALYSTS = ["ARIA","MARCUS","NOVA","VEGA","DELTA","CHAIN",
+            "QUANT","DEFI","ATLAS","REX","ZEN"]
+
+conn = sqlite3.connect(f"{WORKSPACE}/recommendations.db", timeout=30)
+conn.execute("PRAGMA journal_mode=WAL")
+conn.row_factory = sqlite3.Row
+cur = conn.cursor()
+
+def exposure_block(sym):
+    rows = cur.execute(
+        "SELECT analyst, recommendation, position_size_usd "
+        "FROM recommendations WHERE status='OPEN' AND symbol=?",
+        (sym,),
+    ).fetchall()
+    longs, shorts = [], []
+    l_usd = s_usd = 0.0
+    for r in rows:
+        d = (r["recommendation"] or "").upper()
+        usd = r["position_size_usd"] or 0.0
+        if d == "LONG":  longs.append(r["analyst"]);  l_usd += usd
+        elif d == "SHORT": shorts.append(r["analyst"]); s_usd += usd
+    l_pct = l_usd / PORTFOLIO_SIZE * 100
+    s_pct = s_usd / PORTFOLIO_SIZE * 100
+    if l_pct < EXPOSURE_WARN_PCT and s_pct < EXPOSURE_WARN_PCT and not (longs and shorts):
+        return ""
+    lines = ["=== OPEN BOOK EXPOSURE — PRE-CALL CHECK ==="]
+    if l_pct >= EXPOSURE_WARN_PCT:
+        sev = "HARD CAP" if l_pct >= EXPOSURE_CAP_PCT else "WARNING"
+        lines.append(
+            f"  {sev}: {sym} LONG book at {l_pct:.1f}% of ${PORTFOLIO_SIZE:,} "
+            f"({len(longs)} open calls by {', '.join(sorted(set(longs)))})."
+        )
+        if l_pct >= EXPOSURE_CAP_PCT:
+            lines.append(
+                f"  If your call is LONG {sym}, you MUST downgrade to WATCH or "
+                f"size ≤0.5% (${PORTFOLIO_SIZE*0.005:,.0f}). This is not a suggestion."
+            )
+        else:
+            lines.append(
+                f"  If your call is LONG {sym}, halve your sizing or require a "
+                "fresh non-overlapping thesis."
+            )
+    if s_pct >= EXPOSURE_WARN_PCT:
+        sev = "HARD CAP" if s_pct >= EXPOSURE_CAP_PCT else "WARNING"
+        lines.append(
+            f"  {sev}: {sym} SHORT book at {s_pct:.1f}% of ${PORTFOLIO_SIZE:,} "
+            f"({len(shorts)} open calls)."
+        )
+        if s_pct >= EXPOSURE_CAP_PCT:
+            lines.append(f"  If your call is SHORT {sym}, downgrade to WATCH or ≤0.5%.")
+    if longs and shorts:
+        lines.append(
+            f"  CONFLICT: {len(longs)}L vs {len(shorts)}S open on {sym} — "
+            "team is already hedging itself into noise."
+        )
+    lines.append("=" * 44)
+    return "\n".join(lines)
+
+def cooldown_block(sym):
+    rows = cur.execute(
+        "SELECT analyst, recommendation, outcome_pct, thesis, "
+        " (julianday('now') - julianday(REPLACE(closed_at,'T',' '))) * 24 AS hrs "
+        "FROM recommendations "
+        "WHERE status='CLOSED' AND symbol=? AND outcome_pct IS NOT NULL "
+        "  AND outcome_pct < 0 AND closed_at IS NOT NULL "
+        "  AND (julianday('now') - julianday(REPLACE(closed_at,'T',' '))) * 24 <= ? "
+        "ORDER BY closed_at DESC",
+        (sym, COOLDOWN_HOURS),
+    ).fetchall()
+    if not rows:
+        return ""
+    lines = [f"=== RECENT CLOSED LOSSES ON {sym} (last {COOLDOWN_HOURS}h) ==="]
+    for r in rows[:4]:
+        lines.append(
+            f"  {r['analyst']} {r['recommendation']} closed "
+            f"{r['outcome_pct']:+.1f}% {r['hrs']:.1f}h ago. "
+            f"Thesis: {(r['thesis'] or '')[:140]}"
+        )
+    lines.append(
+        "  If your call matches a direction above, you MUST either (a) cite a "
+        "NEW signal absent from the losing thesis or (b) downgrade to WATCH. "
+        "Reflex re-entry was the single biggest P&L leak in the 4/20 lookback."
+    )
+    lines.append("=" * 44)
+    return "\n".join(lines)
+
+def calibration_block(analyst, sym):
+    rows = cur.execute(
+        "SELECT confidence, outcome_pct FROM recommendations "
+        "WHERE analyst=? AND symbol=? AND status='CLOSED' "
+        "  AND outcome_pct IS NOT NULL AND confidence IS NOT NULL "
+        "  AND timestamp >= datetime('now', ?)",
+        (analyst, sym, f"-{CALIBRATION_DAYS} days"),
+    ).fetchall()
+    buckets = {}
+    for r in rows:
+        buckets.setdefault(int(r["confidence"]), []).append(float(r["outcome_pct"]))
+    data = {}
+    for c, pcts in buckets.items():
+        if len(pcts) < CALIBRATION_MIN_N:
+            continue
+        wins = sum(1 for p in pcts if p > 0)
+        data[c] = (len(pcts), wins, wins / len(pcts), sum(pcts) / len(pcts))
+    if not data:
+        return ""
+    lines = [f"=== YOUR {CALIBRATION_DAYS}d CONFIDENCE CALIBRATION — {analyst} on {sym} ==="]
+    for c in sorted(data):
+        n, wins, wr, avg = data[c]
+        lines.append(f"  conf={c}: win_rate={wr:.0%}  avg_outcome={avg:+.2f}%  n={n}")
+    lines.append(
+        "  If your conf=N bucket has a sub-25% win rate above, a conf=N call "
+        "today is likely overconfidence — downgrade the conf unless you can "
+        "cite a signal absent from your prior losing calls."
+    )
+    lines.append("=" * 44)
+    return "\n".join(lines)
+
+# Pre-compute all (analyst, coin) blocks
+guardrails = {}
+for sym in COINS:
+    exp = exposure_block(sym)
+    cd  = cooldown_block(sym)
+    for a in ANALYSTS:
+        calib = calibration_block(a, sym)
+        blocks = [b for b in (exp, cd, calib) if b]
+        guardrails[f"{a}:{sym}"] = "\n\n".join(blocks) if blocks else ""
+
+conn.close()
+json.dump(guardrails, open(f"{SCRATCH}/guardrails.json", "w"), indent=2)
+
+# Dump a human-visible summary so the roleplay context includes the blocks
+print("=== GUARDRAIL CONTEXT SUMMARY ===")
+for sym in COINS:
+    exp_present  = bool(exposure_block(sym) if False else guardrails[f"ARIA:{sym}"])
+    # print the shared exposure + cooldown context once per coin
+    shared = exposure_block(sym)
+    cd     = cooldown_block(sym)
+    if shared or cd:
+        print(f"\n--- {sym} ---")
+        if shared: print(shared)
+        if cd:     print(cd)
+    else:
+        print(f"\n--- {sym} --- (quiet book, no exposure/cooldown flags)")
+# And a few representative per-analyst calibrations
+for pair in ("ARIA:BTC","NOVA:ETH","ZEN:RPL","REX:ETH"):
+    if guardrails.get(pair):
+        print(f"\n--- calibration sample [{pair}] ---")
+        print(calibration_block(pair.split(":")[0], pair.split(":")[1]) or "(no data)")
+PY
+```
+
+**What §5 must do with this JSON.** Before writing any analyst's roleplay
+output, open `$SCRATCH/guardrails.json` and look up the key
+`"<ANALYST>:<COIN>"`. The value is either:
+- An empty string → the book is quiet, proceed normally.
+- A text block containing one or more of: exposure warning, cooldown
+  warning, confidence calibration. Every one of these lines is mandatory
+  context — your analyst must visibly respect these rules in both thesis
+  and sizing, not just acknowledge them. Contradicting a HARD CAP or
+  firing into a cooldown window without a new signal is an error.
+
 ## 5. THE 11-ANALYST INLINE ANALYSIS
 
-Roleplay each analyst *in order*. Each sees the prior analysts' outputs. Keep each under ~200 words. Portfolio size is **$124,000**. Each analyst MUST end with a signal line in exactly this format:
+Roleplay each analyst, inserting that analyst's guardrail block (from
+`$SCRATCH/guardrails.json["<ANALYST>:<COIN>"]`) into their reasoning
+before they produce a thesis. Keep each output under ~200 words.
+Portfolio size is **$124,000**. Each analyst MUST end with a signal
+line in exactly this format:
 
 ```
 [SIGNAL: LONG|SHORT|WATCH|AVOID|NEUTRAL | CONFIDENCE: N | TARGET: $X | STOP: $Y | SIZE: P% ($USD) | THESIS: one-sentence rationale]
 ```
 
-Roster (run in this order):
-1. **ARIA** — Technical (RSI, MACD, BB, EMA trends)
-2. **MARCUS** — Tape reader (volume, order flow, price action)
-3. **NOVA** — Macro/catalyst/sentiment (Fear & Greed, news, funding rate *direction*)
-4. **VEGA** — Derivatives/options. Only BTC & ETH have options depth — for RPL emit `WATCH` with thesis "no liquid options market"
-5. **DELTA** — Futures/perpetuals (OI from Bybit, funding rate direction, liquidation clusters)
-6. **CHAIN** — On-chain flows, MVRV, whale activity (inferred from public data)
-7. **QUANT** — Correlations, vol regime, statistical edges
-8. **DEFI** — TVL, protocol revenue, token unlocks (especially relevant for RPL)
-9. **ATLAS** — Geopolitical/regulatory (SEC, ETF flows, policy)
-10. **REX** — Risk manager, sets stops/sizing/R:R given the above
-11. **ZEN** — Contrarian, fades consensus if the other 10 are leaning hard one way
+### Cohort structure (2026-04-20 lookback recommendation)
+
+To break the ordering-bias cascade that drove the 7% ETH LONG win rate
+last week, split the 11 analysts into two cohorts:
+
+**COHORT 1 — "blind" seats (derive independently from market data only):**
+ARIA, MARCUS, NOVA, VEGA, DELTA
+
+When writing any cohort-1 analyst, you MUST derive that analyst's call
+from the market data + their guardrail block ONLY. Do NOT reference
+any other cohort-1 analyst's prior output, even implicitly. Each
+cohort-1 analyst should read as if they have never seen the other four
+in this round. Randomize the order in which you emit cohort 1 (e.g.
+roll VEGA first one run, NOVA first the next) so no single seat anchors
+the top of the report every time — pick a different order each run.
+
+**COHORT 2 — synthesizers (see cohort 1 outputs):**
+CHAIN, QUANT, DEFI, ATLAS, REX, ZEN
+
+Cohort 2 runs sequentially and SHOULD reference cohort 1 — those roles
+are explicit synthesizers. Keep this order exactly so REX's directive
+can flow into ZEN.
+
+### Roster (roleplay per cohort structure above)
+
+1. **ARIA** — Technical (RSI, MACD, BB, EMA trends). *Cohort 1 — blind.*
+2. **MARCUS** — Tape reader (volume, order flow, price action). *Cohort 1 — blind.*
+3. **NOVA** — Macro/catalyst/sentiment (Fear & Greed, news, funding rate direction). *Cohort 1 — blind.*
+4. **VEGA** — Derivatives/options. Only BTC & ETH have options depth — for RPL emit `WATCH` with thesis "no liquid options market". *Cohort 1 — blind.*
+5. **DELTA** — Futures/perpetuals (OI from Bybit, funding rate direction, liquidation clusters). *Cohort 1 — blind.*
+6. **CHAIN** — On-chain flows, MVRV, whale activity (inferred from public data). *Cohort 2.*
+7. **QUANT** — Correlations, vol regime, statistical edges. *Cohort 2.*
+8. **DEFI** — TVL, protocol revenue, token unlocks (especially relevant for RPL). *Cohort 2.*
+9. **ATLAS** — Geopolitical/regulatory (SEC, ETF flows, policy). *Cohort 2.*
+
+10. **REX** — Risk manager. *Cohort 2.* CRITICAL accountability framing:
+    the 2026-04-13..19 lookback showed you went LONG 28/28 on BTC and
+    27/1 on ETH — a 0% challenge rate. That is trading the team's
+    narrative, not risk management. When the book exposure block shows
+    same-direction exposure on this coin ≥10% of portfolio, your default
+    must be WATCH or a reduced-size contrary call — not another add.
+    Being disagreeable when the book is lopsided is the job.
+
+    **Required output — EXPOSURE_BLOCK directive.** Immediately BEFORE
+    your `[SIGNAL: ...]` line, emit EXACTLY ONE line in this format:
+    - `EXPOSURE_BLOCK: YES`   → book is over-extended; ZEN MUST downgrade/shrink
+    - `EXPOSURE_BLOCK: NO`    → headroom exists; normal sizing applies
+
+    Say YES whenever: (a) the exposure block in your context shows any
+    same-direction notional ≥10% of portfolio on this coin, OR (b) 5+
+    of the 9 prior analysts (cohorts 1 + 2) in this round are already
+    pointing the same direction. Say NO only when you are actively
+    clearing the trade. The downstream parser requires this directive —
+    omitting it is an error logged as `rex-missing-exposure-block-<SYM>`.
+
+11. **ZEN** — Contrarian. *Cohort 2.* GATED — you may publish a LONG or
+    SHORT signal ONLY if at least ONE of the following numeric triggers
+    is true for this coin, and you MUST cite its actual value from the
+    live data:
+
+    - Funding rate > 0.05%  (longs crowded)  → supports SHORT
+    - Funding rate < −0.05% (shorts crowded) → supports LONG
+    - Fear & Greed ≥ 75  (extreme greed)     → supports SHORT
+    - Fear & Greed ≤ 25  (extreme fear)      → supports LONG
+    - Put/Call > 1.3  (put-heavy)            → supports LONG
+    - Put/Call < 0.6  (call-heavy)           → supports SHORT
+    - 7+ analysts in this round already aligned the same direction → may
+      support a fade, but still requires ONE of the above as well
+
+    If NO numeric trigger is true, your signal MUST be WATCH or NEUTRAL.
+    Do NOT fade on intuition — the 4/20 lookback showed your lone-fade
+    losses averaged −4% on ETH. Cite the trigger value explicitly
+    (e.g. "F&G=22 — extreme fear contrarian LONG").
+
+    **REX directive parsing.** BEFORE writing ZEN's output for this coin,
+    scan REX's immediately-preceding output for the string
+    `EXPOSURE_BLOCK: YES` or `EXPOSURE_BLOCK: NO` (case-insensitive).
+    If YES, prepend to your reasoning: "REX has flagged the book
+    over-extended — any directional call I emit must downgrade to WATCH
+    or size ≤0.5%." If the directive is missing from REX's output,
+    append the tag `rex-missing-exposure-block-<SYM>` to the degraded
+    tags in §6.
 
 Run this for each coin in {BTC, ETH, RPL} → 33 analyst outputs total.
 
@@ -237,14 +505,25 @@ from datetime import datetime, timezone
 
 TS = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
-# Collect failure flags based on what §3 and §4 actually produced
-tags = ["cowork-fallback"]
+# Collect failure flags based on what §3 / §4 / §4.5 / §5 actually produced
+tags = ["cowork-fallback", "guardrails-v1"]
 if not os.path.exists(f"{SCRATCH}/bybit_BTC_fund.json") or os.path.getsize(f"{SCRATCH}/bybit_BTC_fund.json") < 50:
     tags.append("no-funding")
 ind = json.load(open(f"{SCRATCH}/indicators.json"))
 for sym in ("BTC","ETH","RPL"):
     if ind.get(sym, {}).get("error"):
         tags.append(f"no-indicators-{sym}")
+
+# Tag any REX response that failed to emit the EXPOSURE_BLOCK directive.
+# The flag `rex-missing-exposure-block-<SYM>` is the canonical signal that the
+# roleplay ignored the 2026-04-20 guardrail contract for that coin.
+import re
+_EB_RE = re.compile(r"EXPOSURE_BLOCK\s*:\s*(YES|NO)", re.IGNORECASE)
+rex_outputs = locals().get("rex_outputs_per_coin", {})   # {sym: rex_text}
+for sym, txt in rex_outputs.items():
+    if not _EB_RE.search(txt or ""):
+        tags.append(f"rex-missing-exposure-block-{sym}")
+
 tags_json = json.dumps(tags)
 
 conn = sqlite3.connect(f"{WORKSPACE}/recommendations.db", timeout=30)
@@ -407,6 +686,10 @@ Output a concise summary:
 - Workspace path used
 - Skip-if-fresh result (skipped or proceeded + age in seconds)
 - Data sources that succeeded vs. failed (Kraken/Coinbase/Bybit/CG/FNG)
+- **Guardrail state per coin** (from §4.5): which coins had an exposure
+  WARN or HARD CAP active, which coins had cooldown hits, count of
+  (analyst, coin) pairs with a calibration block emitted
+- **REX directive** per coin: `YES` / `NO` / `MISSING`
 - Signals saved per coin (LONG/SHORT counts)
 - Positions closed by `check_and_close_positions` per coin
 - Commit SHA and push status (ok / skipped / failed)
@@ -425,3 +708,4 @@ Output a concise summary:
 - **Degraded runs MUST be tagged** in the `tags` JSON column so the dashboard can filter them.
 - **Target total runtime:** under 8 minutes.
 - **On partial data, continue** — e.g. missing RPL indicators shouldn't block BTC/ETH signal writes.
+- **Guardrails are mandatory, not advisory.** A HARD CAP in §4.5's output means the affected analyst MUST emit WATCH or ≤0.5% size — this is the 4/20 lookback's #1 finding. Cohort 1 (ARIA/MARCUS/NOVA/VEGA/DELTA) must read as fully independent; no cohort-1 analyst may implicitly reference another cohort-1 analyst's call in 

@@ -75,16 +75,20 @@ python run_scheduled_analysis.py BTC ETH SOL --push
 # Analyze specific coins
 python run_scheduled_analysis.py BTC ETH SOL AVAX LINK --push
 
-# Use Sonnet instead of Haiku (more expensive but higher quality)
+# Use Opus 4.7 (current default — best signal quality)
+python run_scheduled_analysis.py BTC ETH SOL --model claude-opus-4-7 --push
+
+# Use Sonnet for ~5× lower cost at modest quality trade-off
 python run_scheduled_analysis.py BTC ETH SOL --model claude-sonnet-4-6 --push
 
 # Without pushing to GitHub
 python run_scheduled_analysis.py BTC ETH SOL
 ```
 
-**Cost per run (3 coins, 11 analysts each = 33 API calls):**
-- Haiku: ~$0.012/run → ~$8.60/month hourly
-- Sonnet: ~$0.14/run → ~$100/month hourly
+**Cost per run (3 coins, 11 analysts each = 33 API calls), at the 4h cadence (6 runs/day):**
+- Haiku 4.5:  ~$0.012/run → ~$2.20/month
+- Sonnet 4.6: ~$0.14/run  → ~$25/month
+- Opus 4.7:   ~$0.70/run  → ~$125/month  (current default — verify against live per-token rates)
 
 ## How to Run Interactively
 
@@ -162,7 +166,4 @@ Add to `SYMBOL_TO_CG_ID` in `config.py`:
 
 - Python 3.10+ with type hints
 - All data fetchers must handle errors gracefully (try/except, return None on failure)
-- Never hardcode API keys — use environment variables
-- Use `logger` (Python logging) not print() in library code
-- Signal parsing regex is in `main.py` and `run_scheduled_analysis.py` — keep them in sync
-- Tests in `tests/` with `test_` prefix, run with `pytest tests/ -v`
+- Never hardcode API 

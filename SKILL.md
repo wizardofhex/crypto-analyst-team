@@ -69,8 +69,8 @@ except Exception as e:
     print(999999)
 ")
 echo "last_row_age_seconds: $AGE"
-if [ "$AGE" -lt 21600 ]; then
-  echo "Local runner already produced fresh signals (<6h old); skipping Cowork fallback."
+if [ "$AGE" -lt 39600 ]; then
+  echo "Last LLM-team signal <11h old; skipping Cowork run (intended cadence: 12h)."
   exit 0
 fi
 ```
@@ -781,4 +781,4 @@ Output a concise summary:
 
 ## CONSTRAINTS AND GOTCHAS
 
-- **Do NOT call Binance endpoints.** They are geo-blocked in the Cowork sandbox (HTTP 451). Use Kraken / Coinbase / OKX / Crypto.com Exchange 
+- **Do NOT call Binance endpoints.** They are geo-blocked in the Cowork sandbox (HTTP 451). Use Kraken / Coinbase / OKX / Crypto.com Exchange (MCP)

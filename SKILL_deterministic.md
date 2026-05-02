@@ -58,8 +58,8 @@ except Exception:
     print(999999)
 ")
 echo "deterministic_last_row_age_seconds: $AGE"
-if [ "$AGE" -lt 21600 ]; then
-  echo "Local deterministic runner already produced fresh signals (<6h old); skipping."
+if [ "$AGE" -lt 39600 ]; then
+  echo "Last Strategy-B signal <11h old; skipping (intended cadence: 12h)."
   exit 0
 fi
 ```
@@ -244,3 +244,4 @@ Output a one-line summary:
 - Do NOT use the sqlite3 CLI. Inline Python only.
 - Do NOT commit from the workspace `.git` directly — always fresh-clone in scratch.
 - Target runtime: under 3 minutes.
+            

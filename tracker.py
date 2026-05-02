@@ -86,6 +86,34 @@ def init_db() -> None:
                 summary      TEXT NOT NULL
             );
 
+            -- v2 plan + hold-portfolio: long-term holdings the user owns
+            CREATE TABLE IF NOT EXISTS hold_positions (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol      TEXT    NOT NULL UNIQUE,
+                units       REAL    NOT NULL,
+                cost_basis  REAL,
+                entry_date  TEXT,
+                notes       TEXT,
+                updated_at  TEXT    NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS hold_recommendations (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp     TEXT    NOT NULL,
+                run_id        TEXT,
+                analyst       TEXT    NOT NULL,
+                symbol        TEXT    NOT NULL,
+                mode          TEXT    NOT NULL,
+                urgency       TEXT,
+                target_units  REAL,
+                target_price  REAL,
+                confidence    INTEGER,
+                thesis        TEXT,
+                tags          TEXT,
+                current_price REAL,
+                position_units REAL
+            );
+
             CREATE TABLE IF NOT EXISTS analysis_reports (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id       TEXT    NOT NULL UNIQUE,   -- e.g. 20260416_0832Z
@@ -616,3 +644,108 @@ def check_and_close_positions(symbol: str, current_price: float) -> List[Dict[st
         logger.warning("check_and_close_positions error for %s: %s", symbol, exc)
 
     return closed
+
+# ─── Hold-position helpers (v2 plan + hold portfolio) ─────────────────────────
+
+
+def get_hold_positions() -> List[Dict[str, Any]]:
+    """Return all long-term hold positions."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM hold_positions ORDER BY symbol"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_hold_position(symbol: str) -> Optional[Dict[str, Any]]:
+    """Return the hold position for a single symbol, or None."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM hold_positions WHERE symbol = ?",
+            (symbol.upper(),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_hold_position(
+    symbol: str,
+    units: float,
+    cost_basis: Optional[float] = None,
+    entry_date: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> None:
+    """Insert or update a long-term hold position."""
+    ts = _utcnow()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO hold_positions (symbol, units, cost_basis, entry_date, notes, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(symbol) DO UPDATE SET "
+            "units=excluded.units, cost_basis=excluded.cost_basis, "
+            "entry_date=excluded.entry_date, notes=excluded.notes, "
+            "updated_at=excluded.updated_at",
+            (symbol.upper(), units, cost_basis, entry_date, notes, ts),
+        )
+        conn.commit()
+
+
+def save_hold_recommendation(
+    run_id: Optional[str],
+    analyst: str,
+    symbol: str,
+    mode: str,
+    thesis: str,
+    confidence: int = 5,
+    urgency: Optional[str] = None,
+    target_units: Optional[float] = None,
+    target_price: Optional[float] = None,
+    current_price: Optional[float] = None,
+    position_units: Optional[float] = None,
+    tags: Optional[List[str]] = None,
+) -> int:
+    """Persist a hold recommendation (HOLD/ADD/TRIM/EXIT) and return its id."""
+    valid_modes = {"HOLD", "ADD", "TRIM", "EXIT"}
+    mode_u = mode.upper()
+    if mode_u not in valid_modes:
+        raise ValueError(f"Invalid hold mode '{mode_u}'. Must be one of {valid_modes}")
+    valid_urg = {None, "HIGH", "MEDIUM", "LOW"}
+    urg_u = urgency.upper() if urgency else None
+    if urg_u not in valid_urg:
+        raise ValueError(f"Invalid urgency '{urg_u}'.")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.execute(
+            "INSERT INTO hold_recommendations "
+            "(timestamp, run_id, analyst, symbol, mode, urgency, target_units, "
+            " target_price, confidence, thesis, tags, current_price, position_units) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                _utcnow(), run_id, analyst, symbol.upper(), mode_u, urg_u,
+                target_units, target_price, max(1, min(10, confidence)),
+                thesis, json.dumps(tags or []), current_price, position_units,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def get_recent_hold_recommendations(symbol: Optional[str] = None,
+                                      limit: int = 50) -> List[Dict[str, Any]]:
+    """Return recent hold recommendations, most recent first."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        if symbol:
+            rows = conn.execute(
+                "SELECT * FROM hold_recommendations WHERE symbol = ? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (symbol.upper(), limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM hold_recommendations ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+

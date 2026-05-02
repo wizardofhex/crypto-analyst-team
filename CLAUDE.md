@@ -19,6 +19,12 @@ GitHub: wizardofhex/crypto-analyst-team (public)
   ├── run_deterministic_strategy.py — Headless rule-based runner (12h cron, Strategy B)
   |     Pre-registered rules using indicators.py, writes to recommendations_deterministic table
   |
+  ├── run_hold_monitor.py — Weekly RPL long-term hold monitor (10K RPL position)
+  |     7-analyst subset in HOLD mode, recommends HOLD/ADD/TRIM/EXIT, writes to hold_recommendations
+  |
+  ├── pre_mortem_tests.py — Weekly evaluator for v2 hypothesis tests (H1-H4)
+  |     SQL-only checks against DB state, writes to hypothesis_tests table
+  |
   └── main.py — Interactive terminal chat (local use)
         Rich UI, /analyze, /team, /lookback commands
 ```
@@ -27,6 +33,14 @@ GitHub: wizardofhex/crypto-analyst-team (public)
 HODL benchmark, deterministic rule-based (Strategy B), and the 11-persona LLM team (Strategy C).
 All three share the same 12-hour cadence, 48-hour time-stops, and database storage. Week 4
 decision rules (in `IMPLEMENTATION_PLAN_v2.md`) compare them and pick the survivor.
+
+**Hold portfolio (v2 + hold extension, 2026-05-02):** RPL is OUT of the active trading universe
+but tracked as a long-term hold position (10K units). Monitored weekly via `run_hold_monitor.py`
+or `SKILL_rpl_hold.md` in Cowork. Decision space is HOLD/ADD/TRIM/EXIT — not LONG/SHORT.
+
+**Cowork-native operation:** `SKILL.md`, `SKILL_deterministic.md`, `SKILL_rpl_hold.md`, and
+`SKILL_premortem.md` cover all four scheduled jobs without requiring local Python. See
+`COWORK_SCHEDULED_TASKS.md` for the cron entries.
 
 ## The 11 Analysts
 
@@ -141,27 +155,4 @@ SQLite at `recommendations.db` with 3 tables:
 
 ## Deployment
 
-- **Dashboard**: Streamlit Community Cloud, auto-deploys from `wizardofhex/crypto-analyst-team` on push
-- **Domain**: `crypto.rocketph.one` → Vercel redirect project (`wizardofhex/rocketphone-redirects`) → Streamlit
-- **DB sync**: `run_scheduled_analysis.py --push` commits and pushes updated `recommendations.db` to GitHub, triggering Streamlit redeploy
-
-## Environment Variables
-
-Required:
-```
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-Optional (enhance specific analysts):
-```
-GLASSNODE_API_KEY=...      # CHAIN: MVRV, NUPL on-chain metrics
-ETHERSCAN_API_KEY=...      # CHAIN: ETH on-chain stats
-COINGECKO_API_KEY=...      # All: higher rate limits
-COINBASE_API_KEY=...       # MARCUS: authenticated order book
-COINBASE_API_SECRET=...    # MARCUS: Coinbase CDP auth
-```
-
-## Adding a New Analyst
-
-1. Add entry to `ANALYST_CONFIGS` dict in `agents.py`
-2. Add name to `ANALYST_ORDER` l
+- **Dashboard**: 

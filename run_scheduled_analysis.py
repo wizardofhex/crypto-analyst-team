@@ -19,7 +19,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -30,6 +30,7 @@ import anthropic
 from agents import create_analyst_team
 from config import ANALYST_ORDER
 from data_fetcher import fetch_all_market_data
+from regime_filter import classify_regime, has_setup, regime_block
 from tracker import (
     check_and_close_positions,
     get_latest_lookback_memory,
@@ -44,7 +45,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("scheduled_analysis")
 
-DEFAULT_COINS = ["BTC", "ETH", "SOL"]
+# v2 plan (2026-05-02): RPL dropped (liquidity); SOL off default list.
+DEFAULT_COINS = ["BTC", "ETH"]
 MODEL = "claude-haiku-4-5-20251001"
 
 # ─── Signal parser (mirrors main.py) ─────────────────────────────────────────
@@ -59,6 +61,52 @@ _SIGNAL_RE = re.compile(
     r"\]",
     re.IGNORECASE,
 )
+
+
+# v2 plan (2026-05-02) -- REX/ZEN thesis-quality validator.
+_GUARDED_ANALYSTS = {"REX", "ZEN"}
+_OTHER_ANALYST_NAMES = {
+    "ARIA", "MARCUS", "NOVA", "VEGA", "DELTA", "CHAIN",
+    "QUANT", "DEFI", "ATLAS",
+}
+_NUMERIC_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
+
+
+def _full_response_thesis(response: str) -> str:
+    sig_idx = response.find("[SIGNAL")
+    if sig_idx < 0:
+        return response.strip()
+    return response[:sig_idx].strip()
+
+
+def validate_rex_zen_thesis(
+    analyst_name: str,
+    full_response: str,
+    declared_signal: str,
+) -> Tuple[str, Optional[str]]:
+    """Return (effective_signal, reject_reason). Downgrade to WATCH on failure."""
+    if analyst_name.upper() not in _GUARDED_ANALYSTS:
+        return declared_signal, None
+    if declared_signal not in ("LONG", "SHORT"):
+        return declared_signal, None
+
+    thesis = _full_response_thesis(full_response)
+    word_count = len(thesis.split())
+    has_numeric = bool(_NUMERIC_RE.search(thesis))
+    upper = thesis.upper()
+    referenced = [n for n in _OTHER_ANALYST_NAMES if n in upper]
+
+    failures = []
+    if word_count < 75:
+        failures.append(f"thesis_too_short({word_count}w)")
+    if not has_numeric:
+        failures.append("no_numeric_citation")
+    if referenced:
+        failures.append("references_others:" + ",".join(referenced))
+
+    if failures:
+        return "WATCH", ",".join(failures)
+    return declared_signal, None
 
 
 def _parse_price(val: Optional[str]) -> Optional[float]:
@@ -100,8 +148,20 @@ def parse_signal(
         except (ValueError, TypeError):
             pass
 
+    # v2 plan: REX/ZEN thesis-validation gate
+    effective_signal, reject_reason = validate_rex_zen_thesis(analyst_name, response, signal)
+    extra_tags: List[str] = []
+    if reject_reason is not None:
+        logger.info(
+            "%s: declared %s -> downgraded to %s (rex-zen-thesis-rejected: %s)",
+            analyst_name, signal, effective_signal, reject_reason,
+        )
+        signal = effective_signal
+        extra_tags.append("rex-zen-thesis-rejected")
+        extra_tags.append(f"reject:{reject_reason}")
+
     if signal not in ("LONG", "SHORT"):
-        logger.info("%s: %s %s (not saved — %s)", analyst_name, signal, symbol, thesis[:60])
+        logger.info("%s: %s %s (not saved -- %s)", analyst_name, signal, symbol, thesis[:60])
         return None
 
     try:
@@ -114,6 +174,7 @@ def parse_signal(
             stop_loss=stop,
             confidence=conf,
             thesis=thesis,
+            tags=extra_tags or None,
             position_size_pct=size_pct,
             position_size_usd=size_usd,
         )
@@ -156,7 +217,7 @@ def analyze_coin(
         logger.warning("CoinGecko rate-limited for %s — proceeding with indicators only", symbol)
         degraded.append(f"cg-rate-limited-{symbol}")
 
-    # Auto-close positions that hit target/stop
+    # Auto-close positions that hit target/stop OR are >48h old (v2 plan)
     closed_lines: List[str] = []
     if current_price:
         closed = check_and_close_positions(symbol, current_price)
@@ -168,12 +229,37 @@ def analyze_coin(
             )
             closed_lines.append(
                 f"- #{c.get('id')} {c.get('analyst')} {c.get('direction')} "
-                f"@ ${c.get('entry_price')} → ${c.get('close_price')} "
+                f"@ ${c.get('entry_price')} -> ${c.get('close_price')} "
                 f"({c.get('outcome')}, {c.get('pnl_pct')}%)"
             )
 
+    # ── v2 plan: no-setup precondition gate ───────────────────────────────────
+    should_run, gate_reason = has_setup(symbol, market_data)
+    if not should_run:
+        logger.info("[%s] No-setup gate fired (%s) -- skipping analyst loop", symbol, gate_reason)
+        skip_md = (
+            f"## {symbol} -- Skipped (no setup)\n\n"
+            f"**Spot:** ${current_price}\n\n"
+            f"**Reason:** `{gate_reason}` -- none of the v2 setup triggers fired.\n"
+        )
+        if closed_lines:
+            skip_md += "\n**Auto-closed positions this run:**\n" + "\n".join(closed_lines) + "\n"
+        return {
+            "signals_saved": 0,
+            "report_md": skip_md,
+            "price": current_price,
+            "fear_greed": (market_data.get("fear_greed") or {}).get("value"),
+            "degraded": [f"setup-gate-skip-{symbol}"],
+        }
+
+    # ── v2 plan: regime classifier (label injected into every analyst prompt) ─
+    regime = classify_regime(symbol, market_data)
+    regime_md = regime_block(regime)
+    logger.info("[%s] Regime=%s (%s)", symbol, regime.get("label"), regime.get("reasoning"))
+
     # Load lookback memory
     memory = get_latest_lookback_memory(symbol)
+    regime_aware_memory = regime_md + "\n\n" + (memory or "")
 
     # Fear & Greed is coin-independent but we surface it for the report
     fng_block = market_data.get("fear_greed", {}) or {}
@@ -185,7 +271,10 @@ def analyze_coin(
 
     # Build per-coin report section
     lines: List[str] = []
-    lines.append(f"## {symbol} — 11-Analyst Breakdown (spot ${current_price})")
+    lines.append(f"## {symbol} -- 11-Analyst Breakdown (spot ${current_price})")
+    lines.append("")
+    lines.append(f"**Setup gate:** PASS ({gate_reason})  ")
+    lines.append(f"**Regime:** {regime.get('label')} -- {regime.get('reasoning')}")
     lines.append("")
     if closed_lines:
         lines.append("**Auto-closed positions this run:**")
@@ -195,7 +284,7 @@ def analyze_coin(
     for name in ANALYST_ORDER:
         analyst = team[name]
         try:
-            response = analyst.analyze(question, market_data, prior_responses, memory)
+            response = analyst.analyze(question, market_data, prior_responses, regime_aware_memory)
             prior_responses.append({"analyst": name, "role": analyst.role, "response": response})
             rec_id = parse_signal(response, name, symbol, current_price)
             if rec_id:
@@ -277,7 +366,7 @@ def main() -> None:
     section_mds: List[str] = []
     prices: Dict[str, float] = {}
     fear_greed: Optional[int] = None
-    tags: List[str] = [f"local-runner", f"model:{args.model}"]
+    tags: List[str] = [f"local-runner", f"model:{args.model}", "setup-gate-v1", "guardrails-v2"]
 
     for symbol in args.coins:
         try:
@@ -293,6 +382,8 @@ def main() -> None:
             degraded = result.get("degraded") or []
             if isinstance(degraded, list):
                 tags.extend(str(t) for t in degraded)
+                # v2: thread regime label into tags too
+                # (regime is per-coin so we keep the per-symbol degraded list as the carrier)
         except Exception as exc:
             logger.error("Failed to analyze %s: %s", symbol, exc)
             tags.append(f"analyze-failed-{symbol}")

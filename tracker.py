@@ -6,7 +6,7 @@ Stores analyst calls, tracks outcomes, and persists lookback memory.
 import json
 import sqlite3
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 VALID_RECOMMENDATIONS = {"LONG", "SHORT", "WATCH", "AVOID", "NEUTRAL"}
 VALID_STATUSES = {"OPEN", "CLOSED", "EXPIRED"}
+
+# v2 plan (2026-05-02): every OPEN LONG/SHORT auto-expires after this many hours
+# regardless of whether target/stop hit. Prevents zombie positions like the
+# orphan SOL SHORT that sat at -74% for a month.
+DEFAULT_MAX_HOURS_OPEN = 48
 
 
 def _connect(timeout: int = 30) -> sqlite3.Connection:
@@ -434,6 +439,84 @@ def get_analysis_report(run_id: str) -> Optional[Dict[str, Any]]:
 # ─── Auto-close positions ─────────────────────────────────────────────────────
 
 
+def expire_stale_positions(
+    symbol: str,
+    current_price: float,
+    max_hours: int = DEFAULT_MAX_HOURS_OPEN,
+) -> List[Dict[str, Any]]:
+    """
+    Expire any OPEN LONG/SHORT position older than max_hours.
+
+    v2 plan (2026-05-02). Marks them with status=EXPIRED at the current_price.
+    The outcome_pct is computed from the direction's perspective, same as a
+    normal close. Run BEFORE check_and_close_positions so we don't double-close.
+    """
+    expired: List[Dict[str, Any]] = []
+    if not current_price or current_price <= 0:
+        return expired
+
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=max_hours)).isoformat()
+
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, analyst, symbol, recommendation, entry_price, timestamp "
+                "FROM recommendations WHERE status='OPEN' AND symbol=? "
+                "AND recommendation IN ('LONG','SHORT') AND timestamp <= ? "
+                "AND entry_price IS NOT NULL AND entry_price > 0 "
+                "ORDER BY timestamp ASC",
+                (symbol.upper(), cutoff_iso),
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("expire_stale_positions read error for %s: %s", symbol, exc)
+        return expired
+
+    for r in rows:
+        direction = (r["recommendation"] or "").upper()
+        entry_price = r["entry_price"]
+        try:
+            ts_str = r["timestamp"].replace("Z", "+00:00")
+            age_hours = round(
+                (datetime.now(timezone.utc) - datetime.fromisoformat(ts_str)).total_seconds() / 3600.0,
+                1,
+            )
+        except Exception:
+            age_hours = float(max_hours)
+
+        try:
+            outcome_pct = close_recommendation(r["id"], current_price, status="EXPIRED")
+        except Exception as exc:
+            logger.warning(
+                "expire_stale_positions: failed to expire id=%s for %s: %s",
+                r["id"], symbol, exc,
+            )
+            continue
+
+        outcome = "WIN" if (outcome_pct is not None and outcome_pct > 0) else (
+            "LOSS" if (outcome_pct is not None and outcome_pct < 0) else "FLAT"
+        )
+
+        expired.append({
+            "id": r["id"],
+            "analyst": r["analyst"],
+            "symbol": r["symbol"],
+            "direction": direction,
+            "outcome": outcome,
+            "pnl_pct": outcome_pct,
+            "entry_price": entry_price,
+            "close_price": current_price,
+            "age_hours": age_hours,
+        })
+
+        logger.info(
+            "Expired stale id=%s analyst=%s %s age=%sh pnl=%s",
+            r["id"], r["analyst"], symbol, age_hours, outcome_pct,
+        )
+
+    return expired
+
+
 def check_and_close_positions(symbol: str, current_price: float) -> List[Dict[str, Any]]:
     """
     Check all OPEN LONG/SHORT positions for a symbol and auto-close any that
@@ -447,11 +530,20 @@ def check_and_close_positions(symbol: str, current_price: float) -> List[Dict[st
 
     Skips positions where entry_price, target_price, or stop_loss is None/0.
 
-    Returns a list of dicts for every position that was closed this call:
-      {id, analyst, symbol, direction, outcome, pnl_pct,
-       entry_price, close_price, target_price, stop_loss,
-       hit_target, hit_stop}
+    v2 plan (2026-05-02): also expires stale positions (>48h old) BEFORE the
+    target/stop check, so every position is closed on one of three paths:
+    target hit, stop hit, or 48h time-stop.
+
+    Returns a list of dicts for every position that was closed this call
+    (target/stop closes only; expired positions are returned by
+    expire_stale_positions and logged separately).
     """
+    # v2 pre-flight: expire stale positions first so we don't double-close
+    try:
+        expire_stale_positions(symbol, current_price)
+    except Exception as exc:
+        logger.warning("Pre-flight expire_stale_positions error for %s: %s", symbol, exc)
+
     closed: List[Dict[str, Any]] = []
     try:
         open_recs = get_open_recommendations(symbol)

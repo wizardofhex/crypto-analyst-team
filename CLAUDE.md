@@ -13,12 +13,20 @@ GitHub: wizardofhex/crypto-analyst-team (public)
   |     URL: https://crypto-analyst-team-pnf2pgrtweknvqkubxa6id.streamlit.app/
   |     Domain: crypto.rocketph.one (via Vercel redirect)
   |
-  ├── run_scheduled_analysis.py  — Headless runner (cron/scheduled use)
-  |     Analyzes BTC/ETH/SOL, saves to DB, pushes to GitHub
+  ├── run_scheduled_analysis.py  — Headless LLM-team runner (12h cron)
+  |     Analyzes BTC/ETH (RPL dropped under v2 plan), no-setup gate, saves to DB, pushes to GitHub
+  |
+  ├── run_deterministic_strategy.py — Headless rule-based runner (12h cron, Strategy B)
+  |     Pre-registered rules using indicators.py, writes to recommendations_deterministic table
   |
   └── main.py — Interactive terminal chat (local use)
         Rich UI, /analyze, /team, /lookback commands
 ```
+
+**Strategy structure (v2 plan, 2026-05-02):** the system runs three competing strategies in parallel —
+HODL benchmark, deterministic rule-based (Strategy B), and the 11-persona LLM team (Strategy C).
+All three share the same 12-hour cadence, 48-hour time-stops, and database storage. Week 4
+decision rules (in `IMPLEMENTATION_PLAN_v2.md`) compare them and pick the survivor.
 
 ## The 11 Analysts
 
@@ -69,26 +77,32 @@ REX and ZEN run last so they can synthesize and challenge the full team's output
 ## How to Run the Scheduled Analysis
 
 ```bash
-# Default: analyze BTC, ETH, SOL with Haiku and push DB to GitHub
-python run_scheduled_analysis.py BTC ETH SOL --push
+# Default (v2): analyze BTC + ETH with Haiku and push DB to GitHub
+python run_scheduled_analysis.py BTC ETH --push
 
-# Analyze specific coins
-python run_scheduled_analysis.py BTC ETH SOL AVAX LINK --push
+# Analyze specific coins (RPL dropped under v2 plan due to thin liquidity)
+python run_scheduled_analysis.py BTC ETH AVAX LINK --push
 
-# Use Opus 4.7 (current default — best signal quality)
-python run_scheduled_analysis.py BTC ETH SOL --model claude-opus-4-7 --push
+# Use Sonnet for higher signal quality
+python run_scheduled_analysis.py BTC ETH --model claude-sonnet-4-6 --push
 
-# Use Sonnet for ~5× lower cost at modest quality trade-off
-python run_scheduled_analysis.py BTC ETH SOL --model claude-sonnet-4-6 --push
+# Use Opus 4.7 (~5× cost over Sonnet)
+python run_scheduled_analysis.py BTC ETH --model claude-opus-4-7 --push
 
 # Without pushing to GitHub
-python run_scheduled_analysis.py BTC ETH SOL
+python run_scheduled_analysis.py BTC ETH
+
+# Run the deterministic baseline strategy (Strategy B) in parallel
+python run_deterministic_strategy.py BTC ETH --push
 ```
 
-**Cost per run (3 coins, 11 analysts each = 33 API calls), at the 4h cadence (6 runs/day):**
-- Haiku 4.5:  ~$0.012/run → ~$2.20/month
-- Sonnet 4.6: ~$0.14/run  → ~$25/month
-- Opus 4.7:   ~$0.70/run  → ~$125/month  (current default — verify against live per-token rates)
+**Cost per run (2 coins, 11 analysts each = 22 API calls), at the 12h cadence (2 runs/day):**
+- Haiku 4.5:  ~$0.008/run → ~$0.50/month
+- Sonnet 4.6: ~$0.10/run  → ~$6/month
+- Opus 4.7:   ~$0.45/run  → ~$27/month
+
+The no-setup gate (Item #1) typically skips 50–70% of runs entirely on coins with no qualifying
+trigger, further reducing cost.
 
 ## How to Run Interactively
 
@@ -150,20 +164,4 @@ COINBASE_API_SECRET=...    # MARCUS: Coinbase CDP auth
 ## Adding a New Analyst
 
 1. Add entry to `ANALYST_CONFIGS` dict in `agents.py`
-2. Add name to `ANALYST_ORDER` list in `config.py` (position matters — later = sees more prior responses)
-3. Add color to `COLOR` dict in `main.py`
-4. Add hex color to `ANALYST_COLORS` dict in `dashboard.py`
-5. Optionally add a data fetcher in `data_fetcher.py` and formatter in `agents.py`
-
-## Adding a New Coin
-
-Add to `SYMBOL_TO_CG_ID` in `config.py`:
-```python
-"NEWCOIN": "coingecko-api-id",
-```
-
-## Coding Standards
-
-- Python 3.10+ with type hints
-- All data fetchers must handle errors gracefully (try/except, return None on failure)
-- Never hardcode API 
+2. Add name to `ANALYST_ORDER` l
